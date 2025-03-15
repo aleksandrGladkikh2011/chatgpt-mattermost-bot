@@ -1,6 +1,7 @@
 import mongoClient from './mongo';
 
 import Prompts from './prompts';
+import Channels from './channels';
 
 import PromiseMap from '../utils/promise';
 
@@ -8,6 +9,11 @@ const STORAGES = [
 	{
 		name: 'prompts',
 		Module: Prompts,
+		init: true,
+	},
+	{
+		name: 'channels',
+		Module: Channels,
 		init: true,
 	}
 ];
@@ -37,6 +43,10 @@ class Storage {
 	 */
 	getPrompts(): Prompts {
 		return this.prompts;
+	}
+
+	getChannels(): Channels {
+		return this.channels;
 	}
 }
 

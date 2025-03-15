@@ -19,10 +19,118 @@ import {botLog, matterMostLog} from "./logging";
 import { summaryPrompt, summaryDayPrompt, summaryAdvicePrompt } from "./summary";
 
 import Storage from "./storage";
-import Prompts from "./models/prompts";
+import Channels from "./models/channels";
 
 if (!global.FormData) {
     global.FormData = require('form-data')
+}
+
+interface Command {
+    description: string;
+    example: string;
+    fn: (...args: any[]) => Promise<any>;
+}
+
+interface ChannelData {
+    shouldValidateContent: boolean;
+    channel_display_name: string;
+    prompt: string;
+    sender_name: string;
+}
+
+const COMMANDS: { [key: string]: Command } = {
+    '!help': {
+        description: 'Показать сообщение справки',
+        example: '!help',
+        fn: async () => {
+            const helpMessage = Object.entries(COMMANDS)
+                .map(([cmd, { description, example }]) => `**${cmd}** - ${description}\nПример: \`${example}\``)
+                .join('\n\n');
+
+            return {
+                botInstructions: `Ниже указаны список всех доступных команд с описанием и примером использования. Выведи пользователю в красивой понятной форме\n**Список доступных команд:**\n\n${helpMessage}`,
+                useFunctions: false,
+            };
+        }
+    },
+    '!content_guard': {
+        description: 'Установить проверку сообщений для канала',
+        example: '1. !content_guard set <channel_name> <prompt>\n2. !content_guard list\n3. !content_guard delete <channel_name>',
+        fn: async ({ channels }: { channels: Channels }, { message, sender_name }: { message: string, sender_name: string }) => {
+            const [, action, channel_name, prompt] = split(message, ' ', 3);
+
+            if (action === 'set' && channel_name && prompt) {
+                const existingChannel = await channels.get({ channel_display_name: channel_name }) || {};
+                const saveChannelData: ChannelData = {
+                    shouldValidateContent: true,
+                    channel_display_name: channel_name,
+                    prompt: prompt,
+                    sender_name: sender_name,
+                };
+
+                if (existingChannel._id) {
+                    await channels.update({ _id: existingChannel._id }, saveChannelData);
+                } else {
+                    await channels.add(saveChannelData);
+                }
+
+                return {
+                    botInstructions: `Вывести пользователю сообщение: ✅ Проверка контента установлена для **${channel_name}**\n🔹 **Prompt**: ${prompt}\n👤 **Добавил**: ${sender_name}`,
+                    useFunctions: false,
+                };
+            }
+
+            if (action === 'list') {
+                const guards = await channels.getAll({ shouldValidateContent: true });
+
+                if (!guards.length) {
+                    return {
+                        botInstructions: 'Вывести пользователю сообщение: ℹ️ Нет установленных проверок контента.',
+                        useFunctions: false,
+                    };
+                }
+
+                const listMessage = guards.map((g: ChannelData) => 
+                    `📌 **Канал**: ${g.channel_display_name}\n🔹 **Prompt**: ${g.prompt}\n👤 **Добавил**: ${g.sender_name}`
+                ).join('\n\n');
+
+                return {
+                    botInstructions: `Вывести пользователю сообщение: 📖 **Список активных проверок:**\n\n${listMessage}`,
+                    useFunctions: false,
+                };
+            }
+
+            if (action === 'delete' && channel_name) {
+                const existingChannel = await channels.get({ channel_display_name: channel_name });
+
+                if (!existingChannel) {
+                    return {
+                        botInstructions: `Вывести пользователю сообщение: ⚠️ Проверка для **${channel_name}** не найдена.`,
+                        useFunctions: false,
+                    };
+                }
+
+                if (existingChannel.sender_name !== sender_name) {
+                    return {
+                        botInstructions: `Вывести пользователю сообщение: ⚠️ Вы не можете удалить проверку, которую не добавили.`,
+                        useFunctions: false,
+                    };
+                }
+
+                await channels.remove({ _id: existingChannel._id }, true);
+
+                return {
+                    botInstructions: `Вывести пользователю сообщение: 🗑 Проверка контента для **${channel_name}** удалена.`,
+                    useFunctions: false,
+                };
+            }
+
+            return {
+                botInstructions: '⚠️ Неверный формат команды. Используйте `!help !content_guard` для справки.',
+                useFunctions: false,
+            };
+        }
+    },
 }
 
 const name = process.env['MATTERMOST_BOTNAME'] || '@chatgpt'
@@ -55,10 +163,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     // example
     const storage = new Storage({});
     await storage.init();
-    const prompts = new Prompts({}, storage);
-
-    console.log(await prompts.getAll({}));
-    // end example
+    const channels = new Channels({}, storage);
 
     if (msg.event !== 'posted' || !meId) {
         matterMostLog.debug({ msg: msg })
@@ -66,41 +171,55 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     }
 
     const msgData = parseMessageData(msg.data);
+    const channelData = await channels.get({ channel_display_name: msgData.channel_display_name }) || {};
 
     let lookBackTime;
 
     if (msgData.channel_type === 'D') {
-        lookBackTime = 1000 * 60 * 60 * 24;
+        lookBackTime = 1000 * 60 * 60 * 24 * 7;
     }
 
-    const posts = await getOlderPosts(msgData.post, { lookBackTime })
+    const posts = await getOlderPosts(msgData.post, { lookBackTime });
+    // TODO: на случай расширения и выносы команд в каналы
+    // msgData.channel_type === 'D' - пока только для лчики
+    const SPLIT_MESSAGE_FOR_BOT = split(msgData.post.message.replace(meId, '').trim(), ' ', 2);
+    const command = SPLIT_MESSAGE_FOR_BOT[0] && COMMANDS[SPLIT_MESSAGE_FOR_BOT[0]];
+    // --------------
 
-    if (isMessageIgnored(msgData, meId, posts)) {
-        return
-    }
-
-    /* The main system instruction for GPT */
-    let botInstructions = "Your name is " + name + ". " + additionalBotInstructions
-    botLog.debug({botInstructions: botInstructions})
-
-    const splitMessage = split(msgData.post.message, ' ', 2);
-
+    let botInstructions = "Your name is " + name + ". " + additionalBotInstructions;
     let useFunctions = true;
 
-    if (splitMessage[1] === 'summary') {
-        botInstructions = summaryPrompt + (splitMessage[2] ?? '');
+    if (channelData.shouldValidateContent && !msgData.post.root_id && msgData.post.user_id !== meId) {
+        botInstructions = channelData.prompt;
         useFunctions = false;
+    } else if (command && msgData.channel_type === 'D') {
+        const result = await command.fn({ channels }, { message: msgData.post.message, sender_name: msgData.sender_name });
+
+        botInstructions = result.botInstructions;
+        useFunctions = result.useFunctions;
+    } else if (isMessageIgnored(msgData, meId, posts)) {
+        return;
+    } else {
+        /* The main system instruction for GPT */
+        let splitMessage = split(msgData.post.message, ' ', 2);
+
+        if (splitMessage[1] === 'summary') {
+            botInstructions = summaryPrompt + (splitMessage[2] ?? '');
+            useFunctions = false;
+        }
+
+        if (splitMessage[1] === 'summary_day') {
+            botInstructions = summaryDayPrompt + (splitMessage[2] ?? '');
+            useFunctions = false;
+        }
+
+        if (splitMessage[1] === 'summary_advice') {
+            botInstructions = summaryAdvicePrompt + (splitMessage[2] ?? '');
+            useFunctions = false;
+        }
     }
 
-    if (splitMessage[1] === 'summary_day') {
-        botInstructions = summaryDayPrompt + (splitMessage[2] ?? '');
-        useFunctions = false;
-    }
-
-    if (splitMessage[1] === 'summary_advice') {
-        botInstructions = summaryAdvicePrompt + (splitMessage[2] ?? '');
-        useFunctions = false;
-    }
+    botLog.debug({botInstructions: botInstructions});
 
     const chatmessages: ChatCompletionRequestMessage[] = [
         {
@@ -167,7 +286,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
  */
 function isMessageIgnored(msgData: MessageData, meId: string, previousPosts: Post[]): boolean {
     // we are not in a thread and not mentioned
-    if (msgData.post.root_id === '' && !msgData.mentions.includes(meId)) {
+    if (msgData.post.root_id === '' && !msgData.mentions.includes(meId) || msgData.post.type === 'system_add_to_channel') {
         return true;
     }
     if (
