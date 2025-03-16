@@ -20,6 +20,7 @@ import { summaryPrompt, summaryDayPrompt, summaryAdvicePrompt } from "./summary"
 
 import Storage from "./storage";
 import Channels from "./models/channels";
+import Prompts from "./models/prompts";
 
 if (!global.FormData) {
     global.FormData = require('form-data')
@@ -32,19 +33,28 @@ interface Command {
 }
 
 interface ChannelData {
+    _id?: string;
     shouldValidateContent: boolean;
     channel_display_name: string;
     prompt: string;
-    sender_name: string;
+    created_by: string;
+}
+
+interface PromptData {
+    _id?: string;
+    name: string;
+    text: string;
+    type: string;
+    created_by: string;
 }
 
 const COMMANDS: { [key: string]: Command } = {
     '!help': {
         description: 'Показать сообщение справки',
-        example: '!help',
+        example: '\n!help',
         fn: async () => {
             const helpMessage = Object.entries(COMMANDS)
-                .map(([cmd, { description, example }]) => `**${cmd}** - ${description}\nПример: \`${example}\``)
+                .map(([cmd, { description, example }]) => `**${cmd}** - ${description}\nПример: ${example}`)
                 .join('\n\n');
 
             return {
@@ -55,9 +65,11 @@ const COMMANDS: { [key: string]: Command } = {
     },
     '!content_guard': {
         description: 'Установить проверку сообщений для канала',
-        example: '1. !content_guard set <channel_name> <prompt>\n2. !content_guard list\n3. !content_guard delete <channel_name>',
+        example: '\n1. !content_guard set <channel_name> <prompt>\n2. !content_guard list\n3. !content_guard delete <channel_name>',
         fn: async ({ channels }: { channels: Channels }, { message, sender_name }: { message: string, sender_name: string }) => {
             const [, action, channel_name, prompt] = split(message, ' ', 3);
+
+            let botInstructions = '⚠️ Неверный формат команды. Используйте `!help` для справки.';
 
             if (action === 'set' && channel_name && prompt) {
                 const existingChannel = await channels.get({ channel_display_name: channel_name }) || {};
@@ -65,7 +77,7 @@ const COMMANDS: { [key: string]: Command } = {
                     shouldValidateContent: true,
                     channel_display_name: channel_name,
                     prompt: prompt,
-                    sender_name: sender_name,
+                    created_by: sender_name,
                 };
 
                 if (existingChannel._id) {
@@ -74,59 +86,123 @@ const COMMANDS: { [key: string]: Command } = {
                     await channels.add(saveChannelData);
                 }
 
-                return {
-                    botInstructions: `Вывести пользователю сообщение: ✅ Проверка контента установлена для **${channel_name}**\n🔹 **Prompt**: ${prompt}\n👤 **Добавил**: ${sender_name}`,
-                    useFunctions: false,
-                };
+                botInstructions = `✅ Проверка контента установлена для **${channel_name}**\n🔹 **Prompt**: ${prompt}\n👤 **Добавил**: ${sender_name}`;
             }
 
             if (action === 'list') {
                 const guards = await channels.getAll({ shouldValidateContent: true });
 
                 if (!guards.length) {
-                    return {
-                        botInstructions: 'Вывести пользователю сообщение: ℹ️ Нет установленных проверок контента.',
-                        useFunctions: false,
-                    };
+                    botInstructions = 'Вывести пользователю сообщение: ℹ️ Нет установленных проверок контента.';
+                } else {
+                    const listMessage = guards.map((g: ChannelData) => 
+                        `📌 **Канал**: ${g.channel_display_name}\n🔹 **Prompt**: ${g.prompt}\n👤 **Добавил**: ${g.created_by}`
+                    ).join('\n\n');
+    
+                    botInstructions = `📖 **Список активных проверок:**\n\n${listMessage}`;
                 }
-
-                const listMessage = guards.map((g: ChannelData) => 
-                    `📌 **Канал**: ${g.channel_display_name}\n🔹 **Prompt**: ${g.prompt}\n👤 **Добавил**: ${g.sender_name}`
-                ).join('\n\n');
-
-                return {
-                    botInstructions: `Вывести пользователю сообщение: 📖 **Список активных проверок:**\n\n${listMessage}`,
-                    useFunctions: false,
-                };
             }
 
             if (action === 'delete' && channel_name) {
-                const existingChannel = await channels.get({ channel_display_name: channel_name });
+                const existingChannel: ChannelData = await channels.get({ channel_display_name: channel_name });
 
                 if (!existingChannel) {
-                    return {
-                        botInstructions: `Вывести пользователю сообщение: ⚠️ Проверка для **${channel_name}** не найдена.`,
-                        useFunctions: false,
-                    };
+                    botInstructions = `⚠️ Проверка для **${channel_name}** не найдена.`;
+                } else {
+                    if (existingChannel.created_by !== sender_name) {
+                        botInstructions = '⚠️ Вы не можете удалить проверку, которую не добавили.';
+                    } else {
+                        await channels.remove({ _id: existingChannel._id }, true);
+                        botInstructions = `🗑 Проверка контента для **${channel_name}** удалена.`;
+                    }
                 }
+            } 
 
-                if (existingChannel.sender_name !== sender_name) {
-                    return {
-                        botInstructions: `Вывести пользователю сообщение: ⚠️ Вы не можете удалить проверку, которую не добавили.`,
-                        useFunctions: false,
-                    };
+            return {
+                botInstructions: `Вывести пользователю сообщение: ${botInstructions}`,
+                useFunctions: false,
+            };
+        }
+    },
+    '!prompt': {
+        description: 'Управление промптами (сохранение, просмотр, удаление)',
+        example: '\n1. !prompt save <public|private> <name> <text>\n2. !prompt list\n3. !prompt get <name>\n4. !prompt delete <name>',
+        fn: async ({ prompts }: { prompts: Prompts }, { message, sender_name }: { message: string, sender_name: string }) => {
+            const [, action, typeOrName, nameOrText, promptText] = split(message, ' ', 4);
+
+            let botInstructions = '⚠️ Неверный формат команды. Используйте `!help` для справки.';
+
+            if (action === 'save' && typeOrName && nameOrText && promptText) {
+                const type = typeOrName.toLowerCase();
+
+                if (type !== 'public' && type !== 'private') {
+                    botInstructions = '⚠️ Тип промпта должен быть `public` или `private`.';
+                } else {
+                    const promptName = nameOrText;
+                    const existingPrompt = await prompts.get({ name: promptName });
+
+                    if (existingPrompt) {
+                        botInstructions = `⚠️ Промпт с именем **${promptName}** уже существует.`;
+                    } else {
+                        await prompts.add({
+                            name: promptName,
+                            text: promptText,
+                            type: type,
+                            created_by: sender_name,
+                        });
+
+                        botInstructions = `✅ Промпт **${promptName}** (${type}) сохранен.\n👤 **Автор**: ${sender_name}`;
+                    }
                 }
+            }
 
-                await channels.remove({ _id: existingChannel._id }, true);
+            if (action === 'list') {
+                const allPrompts = await prompts.getAll({});
+                const userPrompts = allPrompts.filter((p: PromptData) => p.type === 'public' || p.created_by === sender_name);
 
-                return {
-                    botInstructions: `Вывести пользователю сообщение: 🗑 Проверка контента для **${channel_name}** удалена.`,
-                    useFunctions: false,
-                };
+                if (!userPrompts.length) {
+                    botInstructions = 'ℹ️ У вас нет доступных промптов.';
+                } else {
+                    const listMessage = userPrompts.map((p: PromptData) =>
+                        `📌 **${p.name}** (${p.type})\n👤 **Автор**: ${p.created_by}`
+                    ).join('\n\n');
+
+                    botInstructions = `📖 **Список доступных промптов:**\n\n${listMessage}`;
+                }
+            }
+
+            if (action === 'get' && typeOrName) {
+                const prompt = await prompts.get({ name: typeOrName });
+
+                if (!prompt) {
+                    botInstructions = `⚠️ Промпт **${typeOrName}** не найден.`;
+                } else {
+                    if (prompt.type === 'private' && prompt.created_by !== sender_name) {
+                        botInstructions = `⛔ У вас нет доступа к этому промпту.`;
+                    } else {
+                        botInstructions = `📌 **${prompt.name}** (${prompt.type})\n👤 **Автор**: ${prompt.created_by}\n📝 **Текст:**\n${prompt.text}`;
+                    }
+                }
+            }
+
+            if (action === 'delete' && typeOrName) {
+                const prompt = await prompts.get({ name: typeOrName });
+
+                if (!prompt) {
+                    botInstructions = `⚠️ Промпт **${typeOrName}** не найден.`;
+                } else {
+                    if (prompt.created_by !== sender_name) {
+                        botInstructions = `⛔ Вы можете удалять только свои промпты.`;
+                    } else {
+                        await prompts.remove({ name: typeOrName });
+
+                        botInstructions = `🗑 Промпт **${typeOrName}** удален.`;
+                    }
+                }
             }
 
             return {
-                botInstructions: '⚠️ Неверный формат команды. Используйте `!help !content_guard` для справки.',
+                botInstructions: `Вывести пользователю сообщение: ${botInstructions}`,
                 useFunctions: false,
             };
         }
@@ -164,6 +240,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     const storage = new Storage({});
     await storage.init();
     const channels = new Channels({}, storage);
+    const prompts = new Prompts({}, storage);
 
     if (msg.event !== 'posted' || !meId) {
         matterMostLog.debug({ msg: msg })
@@ -193,30 +270,44 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
         botInstructions = channelData.prompt;
         useFunctions = false;
     } else if (command && msgData.channel_type === 'D') {
-        const result = await command.fn({ channels }, { message: msgData.post.message, sender_name: msgData.sender_name });
+        const result = await command.fn({ channels, prompts }, { message: msgData.post.message, sender_name: msgData.sender_name });
 
         botInstructions = result.botInstructions;
         useFunctions = result.useFunctions;
     } else if (isMessageIgnored(msgData, meId, posts)) {
         return;
     } else {
-        /* The main system instruction for GPT */
+         /* The main system instruction for GPT */
         let splitMessage = split(msgData.post.message, ' ', 2);
+        let commandName = splitMessage[1];
 
-        if (splitMessage[1] === 'summary') {
-            botInstructions = summaryPrompt + (splitMessage[2] ?? '');
-            useFunctions = false;
-        }
+        // Проверяем, есть ли такой промпт в базе (сначала приватный, затем общий)
+        const userPrompt = await prompts.get({ name: commandName, created_by: msgData.sender_name });
+        const publicPrompt = userPrompt ? null : await prompts.get({ name: commandName, type: 'public' });
 
-        if (splitMessage[1] === 'summary_day') {
-            botInstructions = summaryDayPrompt + (splitMessage[2] ?? '');
+        if (userPrompt || publicPrompt) {
+            const selectedPrompt = userPrompt || publicPrompt;
+            botInstructions = selectedPrompt.text + (splitMessage[2] ?? '');
             useFunctions = false;
-        }
+        } else {
+            // Это было начало и сделали так
+            if (commandName === 'summary') {
+                botInstructions = summaryPrompt + (splitMessage[2] ?? '');
+                useFunctions = false;
+            }
 
-        if (splitMessage[1] === 'summary_advice') {
-            botInstructions = summaryAdvicePrompt + (splitMessage[2] ?? '');
-            useFunctions = false;
+            if (commandName === 'summary_day') {
+                botInstructions = summaryDayPrompt + (splitMessage[2] ?? '');
+                useFunctions = false;
+            }
+
+            if (commandName === 'summary_advice') {
+                botInstructions = summaryAdvicePrompt + (splitMessage[2] ?? '');
+                useFunctions = false;
+            }
+            // -----------------------
         }
+        // -----------------------
     }
 
     botLog.debug({botInstructions: botInstructions});
