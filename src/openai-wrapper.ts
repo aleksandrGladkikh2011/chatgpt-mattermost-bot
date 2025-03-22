@@ -50,7 +50,11 @@ export function registerChatPlugin(plugin: PluginBase<any>) {
  * @param messages The message thread which should be sent.
  * @param msgData The message data of the last mattermost post representing the newest message in the message thread.
  */
-export async function continueThread(messages: ChatCompletionRequestMessage[], msgData: MessageData, options: { useFunctions: boolean }): Promise<AiResponse> {
+export async function continueThread(
+    messages: ChatCompletionRequestMessage[],
+    msgData: MessageData | { channel_id: string, id: string, create_at: number },
+    options: { useFunctions: boolean }
+): Promise<AiResponse> {
     let aiResponse: AiResponse = {
         message: 'Sorry, but it seems I found no valid response.'
     }

@@ -20,7 +20,7 @@ export abstract class PluginBase<T> {
     readonly pluginArguments: Record<string, PluginArgument> = {};
     readonly requiredArguments: string[] = []
 
-    abstract runPlugin(args: T, msgData: MessageData): Promise<AiResponse>;
+    abstract runPlugin(args: T, msgData: MessageData | { channel_id: string, id: string, create_at: number }): Promise<AiResponse>;
     setup(): boolean {
         return true
     }

@@ -1,34 +1,45 @@
-import { DateTime} from 'luxon';
-
-import {continueThread, registerChatPlugin} from "./openai-wrapper";
-import {mmClient, wsClient} from "./mm-client";
 import 'babel-polyfill'
 import 'isomorphic-fetch'
-import {WebSocketMessage} from "@mattermost/client";
-import {ChatCompletionRequestMessage, ChatCompletionRequestMessageRoleEnum} from "openai";
-import {GraphPlugin} from "./plugins/GraphPlugin";
-import {ImagePlugin} from "./plugins/ImagePlugin";
-import {Post} from "@mattermost/types/lib/posts";
-import {PluginBase} from "./plugins/PluginBase";
-import {JSONMessageData, MessageData} from "./types";
-import {ExitPlugin} from "./plugins/ExitPlugin";
-import {MessageCollectPlugin} from "./plugins/MessageCollectPlugin";
+import { WebSocketMessage } from '@mattermost/client';
+import { ChatCompletionRequestMessage } from 'openai';
+import { DateTime } from 'luxon';
 
-import {botLog, matterMostLog} from "./logging";
+import { continueThread, registerChatPlugin } from './openai-wrapper';
+import { mmClient, wsClient, getOlderPosts, userIdToName } from './mm-client';
+import { GraphPlugin } from './plugins/GraphPlugin';
+import { ImagePlugin } from './plugins/ImagePlugin';
+import { PluginBase } from './plugins/PluginBase';
+import { JSONMessageData, MessageData } from './types';
+import { ExitPlugin } from './plugins/ExitPlugin';
+import { MessageCollectPlugin } from './plugins/MessageCollectPlugin';
+import { startCronJobs } from './crons';
 
-import { summaryPrompt, summaryDayPrompt, summaryAdvicePrompt } from "./summary";
+import { botLog, matterMostLog } from './logging';
 
-import Storage from "./storage";
-import Channels from "./models/channels";
-import Prompts from "./models/prompts";
+import { summaryPrompt, summaryDayPrompt, summaryAdvicePrompt } from './summary';
+import { getChatMessagesByPosts } from './utils/posts';
+
+import Storage from './storage';
+import Channels from './models/channels';
+import Prompts from './models/prompts';
+import ScheduledPrompts from './models/scheduled_prompts';
+
+startCronJobs();
 
 if (!global.FormData) {
     global.FormData = require('form-data')
 }
 
+const HANDLE_PROMPTS: { [key: string]: string } = {
+    summary: summaryPrompt,
+    summary_day: summaryDayPrompt,
+    summary_advice: summaryAdvicePrompt,
+};
+
 interface Command {
     description: string;
     example: string;
+    channel_type: string;
     fn: (...args: any[]) => Promise<any>;
 }
 
@@ -52,13 +63,14 @@ const COMMANDS: { [key: string]: Command } = {
     '!help': {
         description: 'Показать сообщение справки',
         example: '\n!help',
+        channel_type: 'D',
         fn: async () => {
             const helpMessage = Object.entries(COMMANDS)
                 .map(([cmd, { description, example }]) => `**${cmd}** - ${description}\nПример: ${example}`)
                 .join('\n\n');
 
             return {
-                botInstructions: `Ниже указаны список всех доступных команд с описанием и примером использования. Выведи пользователю в красивой понятной форме\n**Список доступных команд:**\n\n${helpMessage}`,
+                botInstructions: `**Список доступных команд:**\n\n${helpMessage}`,
                 useFunctions: false,
             };
         }
@@ -66,7 +78,8 @@ const COMMANDS: { [key: string]: Command } = {
     '!content_guard': {
         description: 'Установить проверку сообщений для канала',
         example: '\n1. !content_guard set <channel_name> <prompt>\n2. !content_guard list\n3. !content_guard delete <channel_name>',
-        fn: async ({ channels }: { channels: Channels }, { message, sender_name }: { message: string, sender_name: string }) => {
+        channel_type: 'D',
+        fn: async ({ channels }: { channels: Channels }, { post: { message }, sender_name }: { post: { message: string }, sender_name: string }) => {
             const [, action, channel_name, prompt] = split(message, ' ', 3);
 
             let botInstructions = '⚠️ Неверный формат команды. Используйте `!help` для справки.';
@@ -119,15 +132,28 @@ const COMMANDS: { [key: string]: Command } = {
             } 
 
             return {
-                botInstructions: `Вывести пользователю сообщение: ${botInstructions}`,
+                botInstructions,
                 useFunctions: false,
             };
         }
     },
     '!prompt': {
-        description: 'Управление промптами (сохранение, просмотр, удаление)',
+        description:  `Управление промптами (сохранение, просмотр, удаление)
+
+        📌 **Best practices при создании промптов**:
+        • 🔹 Промпт **обязательно должен начинаться со слова**: \`Промпт:\`
+        • Формулируй промпт как четкое задание или роль: "Промпт: Ты — аналитик данных. Ответь пользователю..."
+        • Добавляй инструкции, что делать при отсутствии цели или проблемы: "Если не указана цель — уточни её."
+        • Используй примеры или правила — они помогут сделать поведение модели стабильным
+        • Не добавляй лишний контекст — пиши максимально конкретно
+        • Можешь использовать маркеры или эмодзи для структурирования ответа
+        
+        💡 Примеры:
+        - "Промпт: Ты — редактор. Проверь текст на орфографические ошибки и предложи улучшения."
+        - "Промпт: Если пользователь прислал неполный запрос — задай уточняющие вопросы."`,
         example: '\n1. !prompt save <public|private> <name> <text>\n2. !prompt list\n3. !prompt get <name>\n4. !prompt delete <name>',
-        fn: async ({ prompts }: { prompts: Prompts }, { message, sender_name }: { message: string, sender_name: string }) => {
+        channel_type: 'D',
+        fn: async ({ prompts }: { prompts: Prompts }, { post: { message }, sender_name }: { post: { message: string }, sender_name: string }) => {
             const [, action, typeOrName, nameOrText, promptText] = split(message, ' ', 4);
 
             let botInstructions = '⚠️ Неверный формат команды. Используйте `!help` для справки.';
@@ -141,7 +167,7 @@ const COMMANDS: { [key: string]: Command } = {
                     const promptName = nameOrText;
                     const existingPrompt = await prompts.get({ name: promptName });
 
-                    if (existingPrompt) {
+                    if (existingPrompt || HANDLE_PROMPTS[promptName]) {
                         botInstructions = `⚠️ Промпт с именем **${promptName}** уже существует.`;
                     } else {
                         await prompts.add({
@@ -174,7 +200,9 @@ const COMMANDS: { [key: string]: Command } = {
             if (action === 'get' && typeOrName) {
                 const prompt = await prompts.get({ name: typeOrName });
 
-                if (!prompt) {
+                if (HANDLE_PROMPTS[typeOrName]) {
+                    botInstructions = `📌 **${typeOrName}** (public)\n👤 **Автор**: system\n📝 **Текст:**\n${HANDLE_PROMPTS[typeOrName]}`;
+                } else if (!prompt) {
                     botInstructions = `⚠️ Промпт **${typeOrName}** не найден.`;
                 } else {
                     if (prompt.type === 'private' && prompt.created_by !== sender_name) {
@@ -188,11 +216,13 @@ const COMMANDS: { [key: string]: Command } = {
             if (action === 'delete' && typeOrName) {
                 const prompt = await prompts.get({ name: typeOrName });
 
-                if (!prompt) {
+                if (HANDLE_PROMPTS[typeOrName]) {
+                    botInstructions = '⛔ Вы не можете удалить этот промпт.';
+                } else if (!prompt) {
                     botInstructions = `⚠️ Промпт **${typeOrName}** не найден.`;
                 } else {
                     if (prompt.created_by !== sender_name) {
-                        botInstructions = `⛔ Вы можете удалять только свои промпты.`;
+                        botInstructions = '⛔ Вы можете удалять только свои промпты.';
                     } else {
                         await prompts.remove({ name: typeOrName });
 
@@ -202,18 +232,97 @@ const COMMANDS: { [key: string]: Command } = {
             }
 
             return {
-                botInstructions: `Вывести пользователю сообщение: ${botInstructions}`,
+                botInstructions,
                 useFunctions: false,
             };
         }
     },
+    '!schedule_prompt': {
+        description: 'Запланировать применение промпта к текущему треду в конце дня',
+        example: '\n1. !schedule_prompt <prompt_name>',
+        // вызывается только если бот указвыается
+        channel_type: 'O',
+        fn: async (
+            { scheduledPrompts, prompts }: { scheduledPrompts: ScheduledPrompts, prompts: Prompts },
+            { post: { message, root_id, channel_id, id }, sender_name }: { post: { message: string, root_id: string, channel_id: string, id: string }, sender_name: string }
+        ) => {
+            const [, , promptName] = message.split(' ', 3);
+
+            if (!promptName) {
+                return {
+                    botInstructions: '⚠️ Укажите имя промпта. Пример: `!schedule_prompt summary`',
+                    useFunctions: false,
+                };
+            }
+
+            // Проверка, что команда вызвана в треде
+            if (!root_id) {
+                return {
+                    botInstructions: '⚠️ Эту команду можно использовать только внутри треда.',
+                    useFunctions: false,
+                };
+            }
+
+            // Проверка, существует ли такой промпт (public или private)
+            const prompt = HANDLE_PROMPTS[promptName] || await prompts.get({
+                name: promptName,
+                $or: [
+                    { type: 'public' },
+                    { type: 'private', created_by: sender_name }
+                ]
+            });
+
+            if (!prompt) {
+                return {
+                    botInstructions: `⚠️ Промпт с именем **${promptName}** не найден.`,
+                    useFunctions: false,
+                };
+            }
+
+            const mskMidnight = DateTime.now()
+                .setZone('Europe/Moscow')
+                .startOf('day')
+                .toMillis();
+            // Проверяем, не существует ли уже запланированный промпт на сегодня в этом треде
+            const existing = await scheduledPrompts.get({
+                thread_id: root_id,
+                run_date: {
+                    $gte: mskMidnight,
+                    $lt: mskMidnight + 24 * 60 * 60 * 1000,
+                },
+            });
+
+            if (existing) {
+                return { 
+                    botInstructions: `⚠️ На сегодня уже запланирован промпт для этого треда: **${existing.prompt_name}**.`,
+                    useFunctions: false,
+                };
+            }
+
+            const now = new Date().getTime();
+
+            await scheduledPrompts.add({
+                thread_id: root_id,
+                channel_id,
+                message_id: id,
+                sender_name,
+                prompt_name: promptName,
+                created_at: now,
+                run_date: now,
+            });
+
+            return {
+                botInstructions: `📌 Промпт **${promptName}** будет применён к этому треду сегодня в конце дня.`,
+                useFunctions: false,
+            };
+        }
+    }
 }
 
-const name = process.env['MATTERMOST_BOTNAME'] || '@chatgpt'
-const contextMsgCount = Number(process.env['BOT_CONTEXT_MSG'] ?? 2500)
+const name = process.env['MATTERMOST_BOTNAME'] || '@chatgpt';
 const additionalBotInstructions = process.env['BOT_INSTRUCTION'] || "You are a helpful assistant. Whenever users asks you for help you will " +
     "provide them with succinct answers formatted using Markdown. You know the user's name as it is provided within the " +
-    "meta data of the messages."
+    "meta data of the messages.";
 
 /* List of all registered plugins */
 const plugins: PluginBase<any>[] = [
@@ -221,7 +330,7 @@ const plugins: PluginBase<any>[] = [
     new ImagePlugin("image-plugin", "Generates an image based on a given image description."),
     new ExitPlugin("exit-plugin", "Says goodbye to the user and wish him a good day."),
     new MessageCollectPlugin("message-collect-plugin", "Collects messages in the thread for a specific user or time"),
-]
+];
 
 function split(text: string, delimeter: string, length: number) {
 	let result = text.split(delimeter);
@@ -236,45 +345,65 @@ function split(text: string, delimeter: string, length: number) {
 }
 
 async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: string) {
-    // example
     const storage = new Storage({});
     await storage.init();
     const channels = new Channels({}, storage);
     const prompts = new Prompts({}, storage);
+    const scheduledPrompts = new ScheduledPrompts({}, storage);
+    const msgData = msg.data && parseMessageData(msg.data) || {};
 
-    if (msg.event !== 'posted' || !meId) {
+    if (msg.event !== 'posted' || !meId || msgData.post?.type === 'system_add_to_channel') {
         matterMostLog.debug({ msg: msg })
-        return
+        return;
     }
 
-    const msgData = parseMessageData(msg.data);
+    const botName = await userIdToName(meId);
     const channelData = await channels.get({ channel_display_name: msgData.channel_display_name }) || {};
-
-    let lookBackTime;
-
-    if (msgData.channel_type === 'D') {
-        lookBackTime = 1000 * 60 * 60 * 24 * 7;
-    }
-
-    const posts = await getOlderPosts(msgData.post, { lookBackTime });
     // TODO: на случай расширения и выносы команд в каналы
-    // msgData.channel_type === 'D' - пока только для лчики
-    const SPLIT_MESSAGE_FOR_BOT = split(msgData.post.message.replace(meId, '').trim(), ' ', 2);
+    // msgData.channel_type === 'D' - пока только для личных сообщений
+    // msgData.channel_type === 'O' - пока только для канала
+    const SPLIT_MESSAGE_FOR_BOT = split(msgData.post.message.replace(`@${botName}`, '').trim(), ' ', 2);
     const command = SPLIT_MESSAGE_FOR_BOT[0] && COMMANDS[SPLIT_MESSAGE_FOR_BOT[0]];
     // --------------
 
     let botInstructions = "Your name is " + name + ". " + additionalBotInstructions;
     let useFunctions = true;
 
+    // start typing
+    const typing = () => wsClient.userTyping(msgData.post.channel_id, (msgData.post.root_id || msgData.post.id) ?? "")
+
     if (channelData.shouldValidateContent && !msgData.post.root_id && msgData.post.user_id !== meId) {
         botInstructions = channelData.prompt;
         useFunctions = false;
-    } else if (command && msgData.channel_type === 'D') {
-        const result = await command.fn({ channels, prompts }, { message: msgData.post.message, sender_name: msgData.sender_name });
+    } else if (command && command.channel_type === msgData.channel_type) {
+        typing();
 
-        botInstructions = result.botInstructions;
-        useFunctions = result.useFunctions;
-    } else if (isMessageIgnored(msgData, meId, posts)) {
+        const typingInterval = setInterval(typing, 2000);
+
+        try {
+            const result = await command.fn({ channels, prompts, scheduledPrompts }, { post: msgData.post, sender_name: msgData.sender_name });
+
+            botInstructions = result.botInstructions;
+            useFunctions = result.useFunctions;
+
+            await mmClient.createPost({
+                message: botInstructions,
+                channel_id: msgData.post.channel_id,
+                root_id: msgData.post.root_id || msgData.post.id,
+            });
+        } catch (e) {
+            botLog.error(e)
+            await mmClient.createPost({
+                message: "Sorry, but I encountered an internal error when trying to process your message",
+                channel_id: msgData.post.channel_id,
+                root_id: msgData.post.root_id || msgData.post.id,
+            })
+        } finally {
+            clearInterval(typingInterval)
+        }
+
+        return;
+    } else if (isMessageIgnored(msgData, meId)) {
         return;
     } else {
          /* The main system instruction for GPT */
@@ -291,18 +420,8 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
             useFunctions = false;
         } else {
             // Это было начало и сделали так
-            if (commandName === 'summary') {
-                botInstructions = summaryPrompt + (splitMessage[2] ?? '');
-                useFunctions = false;
-            }
-
-            if (commandName === 'summary_day') {
-                botInstructions = summaryDayPrompt + (splitMessage[2] ?? '');
-                useFunctions = false;
-            }
-
-            if (commandName === 'summary_advice') {
-                botInstructions = summaryAdvicePrompt + (splitMessage[2] ?? '');
+            if (HANDLE_PROMPTS[commandName]) {
+                botInstructions = HANDLE_PROMPTS[commandName] + (splitMessage[2] ?? '');
                 useFunctions = false;
             }
             // -----------------------
@@ -310,41 +429,23 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
         // -----------------------
     }
 
-    botLog.debug({botInstructions: botInstructions});
+    botLog.debug({ botInstructions });
 
-    const chatmessages: ChatCompletionRequestMessage[] = [
-        {
-            role: ChatCompletionRequestMessageRoleEnum.System,
-            content: botInstructions
-        },
-    ]
+    let lookBackTime;
 
-    // create the context
-    for (const threadPost of posts.slice(-contextMsgCount)) {
-        matterMostLog.trace({msg: threadPost})
-        if (threadPost.user_id === meId) {
-            chatmessages.push({
-                role: ChatCompletionRequestMessageRoleEnum.Assistant,
-                content: threadPost.props.originalMessage ?? threadPost.message
-            })
-        } else {
-            chatmessages.push({
-                role: ChatCompletionRequestMessageRoleEnum.User,
-                name: await userIdToName(threadPost.user_id),
-                content: `${DateTime.fromMillis(threadPost.create_at).toFormat('dd-MM-yyyy HH:mm:ss')} ${threadPost.message}`
-            })
-        }
+    if (msgData.channel_type === 'D') {
+        lookBackTime = 1000 * 60 * 60 * 24 * 7;
     }
 
-    // start typing
-    const typing = () => wsClient.userTyping(msgData.post.channel_id, (msgData.post.root_id || msgData.post.id) ?? "")
-    typing()
-    const typingInterval = setInterval(typing, 2000)
+    const posts = await getOlderPosts(msgData.post, { lookBackTime });
+    const chatmessages: ChatCompletionRequestMessage[] = await getChatMessagesByPosts(posts, botInstructions, meId);
+
+    typing();
+    const typingInterval = setInterval(typing, 2000);
 
     try {
-        const {message, fileId, props} = await continueThread(chatmessages, msgData, { useFunctions })
-        botLog.trace({message})
-
+        const {message, fileId, props} = await continueThread(chatmessages, msgData, { useFunctions });
+        botLog.trace({ message });
         // create answer response
         const newPost = await mmClient.createPost({
             message: message,
@@ -375,9 +476,9 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
  * @param meId The mattermost client id
  * @param previousPosts Older posts in the same channel
  */
-function isMessageIgnored(msgData: MessageData, meId: string, previousPosts: Post[]): boolean {
+function isMessageIgnored(msgData: MessageData, meId: string): boolean {
     // we are not in a thread and not mentioned
-    if (msgData.post.root_id === '' && !msgData.mentions.includes(meId) || msgData.post.type === 'system_add_to_channel') {
+    if (msgData.post.root_id === '' && !msgData.mentions.includes(meId)) {
         return true;
     }
     if (
@@ -409,73 +510,14 @@ function parseMessageData(msg: JSONMessageData): MessageData {
         channel_name: msg.channel_name,
         channel_type: msg.channel_type,
         mentions: JSON.parse(msg.mentions ?? '[]'),
-        post: JSON.parse(msg.post),
+        post: JSON.parse(msg.post ?? '{}'),
         sender_name: msg.sender_name
     }
 }
 
-/**
- * Looks up posts which where created in the same thread and within a given timespan before the reference post.
- * @param refPost The reference post which determines the thread and start point from where older posts are collected.
- * @param options Additional arguments given as object.
- * <ul>
- *     <li><b>lookBackTime</b>: The look back time in milliseconds. Posts which were not created within this time before the
- *     creation time of the reference posts will not be collected anymore.</li>
- *     <li><b>postCount</b>: Determines how many of the previous posts should be collected. If this parameter is omitted all posts are returned.</li>
- * </ul>
- */
-async function getOlderPosts(refPost: Post, options: { lookBackTime?: number, postCount?: number }) {
-    const thread = await mmClient.getPostThread(refPost.id, true, false, true)
-
-    let posts: Post[] = [...new Set(thread.order)].map(id => thread.posts[id])
-        .sort((a, b) => a.create_at - b.create_at)
-
-    if (options.lookBackTime && options.lookBackTime > 0) {
-        posts = posts.filter(a => a.create_at > refPost.create_at - options.lookBackTime!)
-    }
-    if (options.postCount && options.postCount > 0) {
-        posts = posts.slice(-options.postCount)
-    }
-
-    return posts
-}
-
-const usernameCache: Record<string, { username: string, expireTime: number }> = {}
-
-/**
- * Looks up the mattermost username for the given userId. Every username which is looked up will be cached for 5 minutes.
- * @param userId
- */
-async function userIdToName(userId: string): Promise<string> {
-    let username: string
-
-    // check if userId is in cache and not outdated
-    if (usernameCache[userId] && Date.now() < usernameCache[userId].expireTime) {
-        username = usernameCache[userId].username
-    } else {
-        // username not in cache our outdated
-        username = (await mmClient.getUser(userId)).username
-
-        if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
-            username = username.replace(/[.@!?]/g, '_').slice(0, 64)
-        }
-
-        if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
-            username = [...username.matchAll(/[a-zA-Z0-9_-]/g)].join('').slice(0, 64)
-        }
-
-        usernameCache[userId] = {
-            username: username,
-            expireTime: Date.now() + 1000 * 60 * 5
-        }
-    }
-
-    return username
-}
-
 /* Entry point */
 async function main(): Promise<void> {
-    const meId = (await mmClient.getMe()).id
+    const meId = (await mmClient.getMe()).id;
 
     botLog.log("Connected to Mattermost.")
 

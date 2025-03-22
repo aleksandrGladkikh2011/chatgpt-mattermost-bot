@@ -2,6 +2,7 @@ import mongoClient from './mongo';
 
 import Prompts from './prompts';
 import Channels from './channels';
+import ScheduledPrompts from './scheduled_prompts';
 
 import PromiseMap from '../utils/promise';
 
@@ -14,6 +15,11 @@ const STORAGES = [
 	{
 		name: 'channels',
 		Module: Channels,
+		init: true,
+	},
+	{
+		name: 'scheduledPrompts',
+		Module: ScheduledPrompts,
 		init: true,
 	}
 ];
@@ -47,6 +53,10 @@ class Storage {
 
 	getChannels(): Channels {
 		return this.channels;
+	}
+
+	getScheduledPrompts(): ScheduledPrompts {
+		return this.scheduledPrompts;
 	}
 }
 
