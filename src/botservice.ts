@@ -66,7 +66,7 @@ const COMMANDS: { [key: string]: Command } = {
         channel_type: 'D',
         fn: async () => {
             const helpMessage = Object.entries(COMMANDS)
-                .map(([cmd, { description, example }]) => `**${cmd}** - ${description}\nПример: ${example}`)
+                .map(([cmd, { description, example, channel_type }]) => `**${cmd}** - ${description}\n${channel_type === 'D' ? '🔹 Доступно в личных сообщениях' : '🔹 Доступно в треде канала'}\nПример: ${example}`)
                 .join('\n\n');
 
             return {
