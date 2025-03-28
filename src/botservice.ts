@@ -372,7 +372,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     // start typing
     const typing = () => wsClient.userTyping(msgData.post.channel_id, (msgData.post.root_id || msgData.post.id) ?? "")
 
-    if (channelData.shouldValidateContent && !msgData.post.root_id && msgData.post.user_id !== meId) {
+    if (channelData.shouldValidateContent && msgData.post.user_id !== meId) {
         botInstructions = channelData.prompt;
         useFunctions = false;
     } else if (command && command.channel_type === msgData.channel_type) {
