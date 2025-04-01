@@ -372,7 +372,8 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     // start typing
     const typing = () => wsClient.userTyping(msgData.post.channel_id, (msgData.post.root_id || msgData.post.id) ?? "")
 
-    if (channelData.shouldValidateContent && msgData.post.user_id !== meId) {
+    // Проверка, что сообщение в канале или треде с упоминанием бота + shouldValidateContent: true
+    if (channelData.shouldValidateContent && (!msgData.post.root_id || msgData.mentions.includes(meId)) && msgData.post.user_id !== meId) {
         botInstructions = channelData.prompt;
         useFunctions = false;
     } else if (command && command.channel_type === msgData.channel_type) {
