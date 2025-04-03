@@ -3,6 +3,7 @@ import mongoClient from './mongo';
 import Prompts from './prompts';
 import Channels from './channels';
 import ScheduledPrompts from './scheduled_prompts';
+import Reminders from './reminders';
 
 import PromiseMap from '../utils/promise';
 
@@ -20,6 +21,11 @@ const STORAGES = [
 	{
 		name: 'scheduledPrompts',
 		Module: ScheduledPrompts,
+		init: true,
+	},
+	{
+		name: 'reminders',
+		Module: Reminders,
 		init: true,
 	}
 ];
@@ -57,6 +63,10 @@ class Storage {
 
 	getScheduledPrompts(): ScheduledPrompts {
 		return this.scheduledPrompts;
+	}
+
+	getReminders(): Reminders {
+		return this.reminders;
 	}
 }
 

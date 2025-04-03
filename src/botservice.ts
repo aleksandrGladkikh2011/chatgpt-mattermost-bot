@@ -5,7 +5,7 @@ import { ChatCompletionRequestMessage } from 'openai';
 import { DateTime } from 'luxon';
 
 import { continueThread, registerChatPlugin } from './openai-wrapper';
-import { mmClient, wsClient, getOlderPosts, userIdToName } from './mm-client';
+import { mmClient, wsClient, getOlderThreadPosts, getOlderPosts, userIdToName } from './mm-client';
 import { GraphPlugin } from './plugins/GraphPlugin';
 import { ImagePlugin } from './plugins/ImagePlugin';
 import { PluginBase } from './plugins/PluginBase';
@@ -23,6 +23,7 @@ import Storage from './storage';
 import Channels from './models/channels';
 import Prompts from './models/prompts';
 import ScheduledPrompts from './models/scheduled_prompts';
+import Reminders from './models/reminders';
 
 startCronJobs();
 
@@ -316,6 +317,146 @@ const COMMANDS: { [key: string]: Command } = {
                 useFunctions: false,
             };
         }
+    },
+    '!reminder': {
+        description: `Управление напоминаниями (создание, просмотр, удаление)
+
+        📌 Поддерживаемые команды:
+        • !reminder add <HH:mm> <repeat|once> <prompt_name> — создать напоминание
+        • !reminder list — показать все активные напоминания
+        • !reminder delete <prompt_name> — удалить напоминание`,
+
+        example: '\n1. !reminder add 09:00 repeat daily_meeting\n2. !reminder list\n3. !reminder delete daily_meeting',
+        channel_type: 'O',
+
+        fn: async (
+            { reminders, prompts }: { reminders: Reminders, prompts: Prompts },
+            { post: { message, root_id, channel_id, id }, sender_name, botName }: { post: { message: string, root_id: string, channel_id: string, id: string }, sender_name: string, botName: string }
+        ) => {
+            const [, action, timeOrName, repeatOrPrompt, promptName] = message.replace(`@${botName}`, '').trim().split(' ', 5);
+
+            // Проверка на главный канал
+            if (root_id) {
+                return {
+                    botInstructions: '⚠️ Напоминания можно создавать только в главном канале.',
+                    useFunctions: false,
+                };
+            }
+
+            // 🔸 Добавление напоминания
+            if (action === 'add' && timeOrName && repeatOrPrompt) {
+                const time = timeOrName;
+                const repeat = repeatOrPrompt === 'repeat';
+
+                // Проверяем формат времени
+                if (!/^\d{2}:\d{2}$/.test(time)) {
+                    return {
+                        botInstructions: '⚠️ Время должно быть в формате HH:mm. Пример: `!reminder add 09:00 repeat daily_meeting`',
+                        useFunctions: false,
+                    };
+                }
+
+                const [, minutes] = time.split(':').map(Number);
+                if (minutes % 5 !== 0) {
+                    return {
+                        botInstructions: '⚠️ Время должно быть кратно 5 минутам (например: 09:00, 09:05, 09:10).',
+                        useFunctions: false
+                    };
+                }
+
+                // Проверка существования промпта
+                const prompt = HANDLE_PROMPTS[promptName] || await prompts.get({
+                    name: promptName,
+                    $or: [
+                        { type: 'public' },
+                        { type: 'private', created_by: sender_name }
+                    ]
+                });
+                
+                if (!prompt) {
+                    return {
+                        botInstructions: `⚠️ Промпт с именем **${promptName}** не найден.`,
+                        useFunctions: false,
+                    };
+                }
+
+                // Проверка на дубликат
+                const existing = await reminders.get({ prompt_name: promptName, channel_id: channel_id, active: true });
+
+                if (existing) {
+                    return {
+                        botInstructions: `⚠️ Напоминание с именем **${promptName}** уже существует.`,
+                        useFunctions: false,
+                    };
+                }
+
+                const now = new Date().getTime();
+
+                await reminders.add({
+                    message_id: id,
+                    channel_id: channel_id,
+                    prompt_name: promptName,
+                    created_at: now,
+                    run_date: now,
+                    time,
+                    repeat,
+                    created_by: sender_name,
+                    active: true,
+                });
+
+                return {
+                    botInstructions: `🔔 Напоминание **${promptName}** установлено на ${time} (${repeat ? 'повторяется' : 'одноразовое'}).`,
+                    useFunctions: false,
+                };
+            }
+
+            // 🔸 Список напоминаний
+            if (action === 'list') {
+                const activeReminders = await reminders.getAll({ channel_id: channel_id, active: true });
+
+                if (!activeReminders.length) {
+                    return {
+                        botInstructions: 'ℹ️ Нет активных напоминаний.',
+                        useFunctions: false,
+                    };
+                }
+
+                const listMessage = activeReminders.map((r: any) => 
+                    `• ${r.prompt_name} — ${r.time} (${r.repeat ? 'повторяется' : 'одноразовое'})`
+                ).join('\n');
+
+                return {
+                    botInstructions: `📋 **Список активных напоминаний:**\n${listMessage}`,
+                    useFunctions: false,
+                };
+            }
+
+            // 🔸 Удаление напоминания
+            if (action === 'delete' && timeOrName) {
+                const promptName = timeOrName;
+
+                const existing = await reminders.get({ prompt_name: promptName, channel_id: channel_id, active: true });
+
+                if (!existing) {
+                    return {
+                        botInstructions: `⚠️ Напоминание **${promptName}** не найдено.`,
+                        useFunctions: false,
+                    };
+                }
+
+                await reminders.update({ _id: existing._id }, { active: false });
+
+                return {
+                    botInstructions: `🗑 Напоминание **${promptName}** удалено.`,
+                    useFunctions: false,
+                };
+            }
+
+            return {
+                botInstructions: '⚠️ Неверный формат команды. Используйте `!help` для справки.',
+                useFunctions: false,
+            };
+        }
     }
 }
 
@@ -350,7 +491,11 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     const channels = new Channels({}, storage);
     const prompts = new Prompts({}, storage);
     const scheduledPrompts = new ScheduledPrompts({}, storage);
+    const reminders = new Reminders({}, storage);
     const msgData = msg.data && parseMessageData(msg.data) || {};
+
+    // const postsT = await getOlderPosts(msgData.post, { lookBackTime: 1000 * 60 * 60 * 24 });
+    // console.log(postsT)
 
     if (msg.event !== 'posted' || !meId || msgData.post?.type === 'system_add_to_channel') {
         matterMostLog.debug({ msg: msg })
@@ -363,7 +508,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     // msgData.channel_type === 'D' - пока только для личных сообщений
     // msgData.channel_type === 'O' - пока только для канала
     const SPLIT_MESSAGE_FOR_BOT = split(msgData.post.message.replace(`@${botName}`, '').trim(), ' ', 2);
-    const command = SPLIT_MESSAGE_FOR_BOT[0] && COMMANDS[SPLIT_MESSAGE_FOR_BOT[0]];
+    const command: any = SPLIT_MESSAGE_FOR_BOT[0] && COMMANDS[SPLIT_MESSAGE_FOR_BOT[0]];
     // --------------
 
     let botInstructions = "Your name is " + name + ". " + additionalBotInstructions;
@@ -373,16 +518,31 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     const typing = () => wsClient.userTyping(msgData.post.channel_id, (msgData.post.root_id || msgData.post.id) ?? "")
 
     // Проверка, что сообщение в канале или треде с упоминанием бота + shouldValidateContent: true
-    if (channelData.shouldValidateContent && (!msgData.post.root_id || msgData.mentions.includes(meId)) && msgData.post.user_id !== meId) {
+    if (
+        !command &&
+        channelData.shouldValidateContent &&
+        (!msgData.post.root_id || msgData.mentions.includes(meId)) &&
+        msgData.post.user_id !== meId
+    ) {
         botInstructions = channelData.prompt;
         useFunctions = false;
-    } else if (command && command.channel_type === msgData.channel_type) {
+    } else if (command) {
         typing();
 
         const typingInterval = setInterval(typing, 2000);
 
         try {
-            const result = await command.fn({ channels, prompts, scheduledPrompts }, { post: msgData.post, sender_name: msgData.sender_name });
+            if (command.channel_type !== msgData.channel_type) {
+                await mmClient.createPost({
+                    message: `⚠️ Команда используется только для: ${msgData.channel_type === 'D' ? 'личных сообщений' : 'канала'}`,
+                    channel_id: msgData.post.channel_id,
+                    root_id: msgData.post.root_id || msgData.post.id,
+                });
+    
+                return;
+            }
+
+            const result = await command.fn({ channels, prompts, scheduledPrompts, reminders }, { post: msgData.post, sender_name: msgData.sender_name, botName });
 
             botInstructions = result.botInstructions;
             useFunctions = result.useFunctions;
@@ -398,7 +558,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
                 message: "Sorry, but I encountered an internal error when trying to process your message",
                 channel_id: msgData.post.channel_id,
                 root_id: msgData.post.root_id || msgData.post.id,
-            })
+            });
         } finally {
             clearInterval(typingInterval)
         }
@@ -438,7 +598,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
         lookBackTime = 1000 * 60 * 60 * 24 * 7;
     }
 
-    const posts = await getOlderPosts(msgData.post, { lookBackTime });
+    const posts = await getOlderThreadPosts(msgData.post, { lookBackTime });
     const chatmessages: ChatCompletionRequestMessage[] = await getChatMessagesByPosts(posts, botInstructions, meId);
 
     typing();

@@ -63,8 +63,28 @@ function workaroundWebsocketPackageLostIssue(webSocketClient: WebSocketClient) {
  *     <li><b>postCount</b>: Determines how many of the previous posts should be collected. If this parameter is omitted all posts are returned.</li>
  * </ul>
  */
-export async function getOlderPosts(refPost: Post | { id: string, create_at: number }, options: { lookBackTime?: number, postCount?: number }) {
+export async function getOlderThreadPosts(refPost: Post | { id: string, create_at: number }, options: { lookBackTime?: number, postCount?: number }) {
     const thread = await mmClient.getPostThread(refPost.id, true, false, true)
+
+    let posts: Post[] = [...new Set(thread.order)].map(id => thread.posts[id])
+        .sort((a, b) => a.create_at - b.create_at)
+
+    if (options.lookBackTime && options.lookBackTime > 0) {
+        posts = posts.filter(a => a.create_at > refPost.create_at - options.lookBackTime!)
+    }
+    if (options.postCount && options.postCount > 0) {
+        posts = posts.slice(-options.postCount)
+    }
+
+    return posts
+}
+
+export async function getOlderPosts(refPost: Post | { channel_id: string, create_at: number }, options: { lookBackTime?: number, postCount?: number }) {
+    if (!refPost.channel_id) {
+        return [];
+    }
+
+    const thread = await mmClient.getPosts(refPost.channel_id, 0, 100, false, false, true)
 
     let posts: Post[] = [...new Set(thread.order)].map(id => thread.posts[id])
         .sort((a, b) => a.create_at - b.create_at)

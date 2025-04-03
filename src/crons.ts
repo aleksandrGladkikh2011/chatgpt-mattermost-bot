@@ -5,8 +5,10 @@ import { DateTime } from 'luxon';
 import Storage from './storage';
 import Prompts from './models/prompts';
 import ScheduledPrompts from './models/scheduled_prompts';
+import Reminders from './models/reminders';
+
 import { continueThread } from './openai-wrapper';
-import { mmClient, getOlderPosts } from './mm-client';
+import { mmClient, getOlderThreadPosts } from './mm-client';
 import { getChatMessagesByPosts } from './utils/posts';
 import { cronLog } from './logging';
 import { summaryPrompt, summaryDayPrompt, summaryAdvicePrompt } from './summary';
@@ -19,7 +21,7 @@ const HANDLE_PROMPTS: { [key: string]: string } = {
 
 export const startCronJobs = () => {
     const CRON_MSK_22 = '0 19 * * *';
-
+    // Проверка тредов в конце дня и применение промптов
     cron.schedule(CRON_MSK_22, async () => {
         const meId = (await mmClient.getMe()).id;
         const storage = new Storage({});
@@ -59,7 +61,7 @@ export const startCronJobs = () => {
                 continue;
             }
 
-            const posts = await getOlderPosts({ id: entry.message_id, create_at: entry.created_at }, {});
+            const posts = await getOlderThreadPosts({ id: entry.message_id, create_at: entry.created_at }, {});
             const chatmessages: ChatCompletionRequestMessage[] = await getChatMessagesByPosts(posts, prompt.text, meId);
             const { message, props } = await continueThread(chatmessages, { channel_id: entries.channel_id, id: entries.message_id, create_at: entry.created_at }, { useFunctions: false });
 
@@ -78,12 +80,69 @@ export const startCronJobs = () => {
             } catch (err) {
                 cronLog.trace({ message: `❌ Ошибка при применении промпта к треду ${entry.thread_id}:`, error: err });
             }
-      
 
             cronLog.trace({ entry });
         }
 
         cronLog.trace({ message: `[CRON] Выполнено ${entries.length} запланированных промптов` });
+    });
+    const CRON_EVERY_FIVE_MINUTES = '*/5 * * * *';
+    // Проверка напоминаний и применение промптов
+    cron.schedule(CRON_EVERY_FIVE_MINUTES, async () => {
+        const meId = (await mmClient.getMe()).id;
+        const storage = new Storage({});
+        await storage.init();
+        const reminders = new Reminders({}, storage);
+        const prompts = new Prompts({}, storage);
+        const now = DateTime.now().setZone('Europe/Moscow').toFormat('HH:mm');
+
+        const activeReminders = await reminders.getAll({ time: now, active: true });
+
+        cronLog.trace({ message: `[CRON] Начало выполнения: ${activeReminders.length} запланированных напоминаний` });
+
+        for (const entry of activeReminders) {
+            const prompt = HANDLE_PROMPTS[entry.prompt_name] ?
+                { text: HANDLE_PROMPTS[entry.prompt_name] } :
+                await prompts.get({ 
+                    name: entry.prompt_name,
+                    $or: [
+                        { type: 'public' },
+                        { type: 'private', created_by: entry.sender_name }
+                    ]
+                });
+
+            if (!prompt) {
+                cronLog.trace({ message: `⚠️ Промпт ${entry.prompt_name} не найден для ${entry.thread_id}` });
+                continue;
+            }
+
+            // const posts = await getOlderThreadPosts({ id: entry.message_id, create_at: entry.created_at }, {});
+            // без постов, потому что нет треда и хотим сделать больше как оповещение
+            const chatmessages: ChatCompletionRequestMessage[] = await getChatMessagesByPosts([], prompt.text, meId);
+            const { message, props } = await continueThread(chatmessages, { channel_id: entry.channel_id, id: entry.message_id, create_at: entry.created_at }, { useFunctions: false });
+
+            try {
+                await mmClient.createPost({
+                    message,
+                    channel_id: entry.channel_id,
+                    props,
+                    root_id: entry.thread_id,
+                });
+
+                if (!entry.repeat) {
+                    await reminders.update(
+                        { _id: entry._id },
+                        { active: false, finished_at: Date.now() }
+                    );
+                }
+            } catch (err) {
+                cronLog.trace({ message: `❌ Ошибка при применении промпта к треду ${entry.thread_id}:`, error: err });
+            }
+
+            cronLog.trace({ entry });
+        }
+
+        cronLog.trace({ message: `[CRON] Выполнено ${activeReminders.length} запланированных напоминаний` });
     });
 
     cronLog.trace({ message: 'Все крон-задачи запущены.' });
