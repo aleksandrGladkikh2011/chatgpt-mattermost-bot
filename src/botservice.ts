@@ -40,7 +40,7 @@ const HANDLE_PROMPTS: { [key: string]: string } = {
 interface Command {
     description: string;
     example: string;
-    channel_type: string;
+    channel_type: string[];
     fn: (...args: any[]) => Promise<any>;
 }
 
@@ -64,10 +64,10 @@ const COMMANDS: { [key: string]: Command } = {
     '!help': {
         description: 'Показать сообщение справки',
         example: '\n!help',
-        channel_type: 'D',
+        channel_type: ['D'],
         fn: async () => {
             const helpMessage = Object.entries(COMMANDS)
-                .map(([cmd, { description, example, channel_type }]) => `**${cmd}** - ${description}\n${channel_type === 'D' ? '🔹 Доступно в личных сообщениях' : '🔹 Доступно в треде канала'}\nПример: ${example}`)
+                .map(([cmd, { description, example, channel_type }]) => `**${cmd}** - ${description}\n${channel_type.includes('D') ? '🔹 Доступно в личных сообщениях' : '🔹 Доступно в треде канала'}\nПример: ${example}`)
                 .join('\n\n');
 
             return {
@@ -79,7 +79,7 @@ const COMMANDS: { [key: string]: Command } = {
     '!content_guard': {
         description: 'Установить проверку сообщений для канала',
         example: '\n1. !content_guard set <channel_name> <prompt>\n2. !content_guard list\n3. !content_guard delete <channel_name>',
-        channel_type: 'D',
+        channel_type: ['D'],
         fn: async ({ channels }: { channels: Channels }, { post: { message }, sender_name }: { post: { message: string }, sender_name: string }) => {
             const [, action, channel_name, prompt] = split(message, ' ', 3);
 
@@ -153,7 +153,7 @@ const COMMANDS: { [key: string]: Command } = {
         - "Промпт: Ты — редактор. Проверь текст на орфографические ошибки и предложи улучшения."
         - "Промпт: Если пользователь прислал неполный запрос — задай уточняющие вопросы."`,
         example: '\n1. !prompt save <public|private> <name> <text>\n2. !prompt list\n3. !prompt get <name>\n4. !prompt delete <name>',
-        channel_type: 'D',
+        channel_type: ['D'],
         fn: async ({ prompts }: { prompts: Prompts }, { post: { message }, sender_name }: { post: { message: string }, sender_name: string }) => {
             const [, action, typeOrName, nameOrText, promptText] = split(message, ' ', 4);
 
@@ -242,7 +242,7 @@ const COMMANDS: { [key: string]: Command } = {
         description: 'Запланировать применение промпта к текущему треду в конце дня',
         example: '\n1. !schedule_prompt <prompt_name>',
         // вызывается только если бот указвыается
-        channel_type: 'O',
+        channel_type: ['O', 'P'],
         fn: async (
             { scheduledPrompts, prompts }: { scheduledPrompts: ScheduledPrompts, prompts: Prompts },
             { post: { message, root_id, channel_id, id }, sender_name }: { post: { message: string, root_id: string, channel_id: string, id: string }, sender_name: string }
@@ -327,7 +327,7 @@ const COMMANDS: { [key: string]: Command } = {
         • !reminder delete <prompt_name> — удалить напоминание`,
 
         example: '\n1. !reminder add 09:00 repeat daily_meeting\n2. !reminder list\n3. !reminder delete daily_meeting',
-        channel_type: 'O',
+        channel_type: ['O', 'P'],
 
         fn: async (
             { reminders, prompts }: { reminders: Reminders, prompts: Prompts },
@@ -532,7 +532,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
         const typingInterval = setInterval(typing, 2000);
 
         try {
-            if (command.channel_type !== msgData.channel_type) {
+            if (!command.channel_type.includes(msgData.channel_type)) {
                 await mmClient.createPost({
                     message: `⚠️ Команда используется только для: ${msgData.channel_type === 'D' ? 'личных сообщений' : 'канала'}`,
                     channel_id: msgData.post.channel_id,
