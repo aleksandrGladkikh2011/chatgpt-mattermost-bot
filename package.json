@@ -6,7 +6,10 @@
     "start": "ts-node ./src/botservice.ts",
     "build": "tsc",
     "lint": "eslint src/**/*.ts",
-    "format": "eslint src/**/*.ts --fix"
+    "format": "eslint src/**/*.ts --fix",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
   },
   "dependencies": {
     "@mattermost/client": "7.10.0",
@@ -27,7 +30,10 @@
     "ws": "8.12.1"
   },
   "devDependencies": {
-    "@types/ws": "8.5.5"
+    "@types/jest": "^29.5.14",
+    "@types/ws": "8.5.5",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.3.1"
   },
   "engineStrict": true,
   "engines": {

@@ -12,6 +12,7 @@ import { mmClient, getOlderThreadPosts } from './mm-client';
 import { getChatMessagesByPosts } from './utils/posts';
 import { cronLog } from './logging';
 import { summaryPrompt, summaryDayPrompt, summaryAdvicePrompt } from './summary';
+import { calculateNextRunDate } from './utils/time';
 
 const HANDLE_PROMPTS: { [key: string]: string } = {
     summary: summaryPrompt,
@@ -94,53 +95,59 @@ export const startCronJobs = () => {
         await storage.init();
         const reminders = new Reminders({}, storage);
         const prompts = new Prompts({}, storage);
-        const now = DateTime.now().setZone('Europe/Moscow').toFormat('HH:mm');
+        const now = DateTime.now();
 
-        const activeReminders = await reminders.getAll({ time: now, active: true });
+        const activeReminders = await reminders.getAll({ run_date: { $lte: now.toMillis() }, active: true });
 
         cronLog.trace({ message: `[CRON] Начало выполнения: ${activeReminders.length} запланированных напоминаний` });
 
-        for (const entry of activeReminders) {
-            const prompt = HANDLE_PROMPTS[entry.prompt_name] ?
-                { text: HANDLE_PROMPTS[entry.prompt_name] } :
-                await prompts.get({ 
-                    name: entry.prompt_name,
-                    $or: [
-                        { type: 'public' },
-                        { type: 'private', created_by: entry.sender_name }
-                    ]
-                });
+        await Promise.all(
+            activeReminders.map(async (entry: any) => {
+                const prompt = HANDLE_PROMPTS[entry.prompt_name] ?
+                    { text: HANDLE_PROMPTS[entry.prompt_name] } :
+                    await prompts.get({ 
+                        name: entry.prompt_name,
+                        $or: [
+                            { type: 'public' },
+                            { type: 'private', created_by: entry.sender_name }
+                        ]
+                    });
 
-            if (!prompt) {
-                cronLog.trace({ message: `⚠️ Промпт ${entry.prompt_name} не найден для ${entry.thread_id}` });
-                continue;
-            }
-
-            // const posts = await getOlderThreadPosts({ id: entry.message_id, create_at: entry.created_at }, {});
-            // без постов, потому что нет треда и хотим сделать больше как оповещение
-            const chatmessages: ChatCompletionRequestMessage[] = await getChatMessagesByPosts([], prompt.text, meId);
-            const { message, props } = await continueThread(chatmessages, { channel_id: entry.channel_id, id: entry.message_id, create_at: entry.created_at }, { useFunctions: false });
-
-            try {
-                await mmClient.createPost({
-                    message,
-                    channel_id: entry.channel_id,
-                    props,
-                    root_id: entry.thread_id,
-                });
-
-                if (!entry.repeat) {
-                    await reminders.update(
-                        { _id: entry._id },
-                        { active: false, finished_at: Date.now() }
-                    );
+                if (!prompt) {
+                    cronLog.trace({ message: `⚠️ Промпт ${entry.prompt_name} не найден для ${entry.thread_id}` });
+                    return;
                 }
-            } catch (err) {
-                cronLog.trace({ message: `❌ Ошибка при применении промпта к треду ${entry.thread_id}:`, error: err });
-            }
 
-            cronLog.trace({ entry });
-        }
+                // const posts = await getOlderThreadPosts({ id: entry.message_id, create_at: entry.created_at }, {});
+                // без постов, потому что нет треда и хотим сделать больше как оповещение
+                const chatmessages: ChatCompletionRequestMessage[] = await getChatMessagesByPosts([], prompt.text, meId);
+                const { message, props } = await continueThread(chatmessages, { channel_id: entry.channel_id, id: entry.message_id, create_at: entry.created_at }, { useFunctions: false });
+
+                try {
+                    await mmClient.createPost({
+                        message,
+                        channel_id: entry.channel_id,
+                        props,
+                        root_id: entry.thread_id,
+                    });
+
+                    if (entry.repeat) {
+                        // Обновляем дату следующего запуска
+                        const nextRunDate = calculateNextRunDate(entry.time, entry.days);
+                        await reminders.update({ _id: entry._id }, { run_date: nextRunDate });
+                        cronLog.trace({ message: `🔄 Напоминание "${entry.prompt_name}" обновлено на следующий запуск: ${nextRunDate}` });
+                    } else {
+                        // Если одноразовое — деактивируем
+                        await reminders.update({ _id: entry._id }, { active: false, finished_at: Date.now() });
+                        cronLog.trace({ message: `✅ Одноразовое напоминание "${entry.prompt_name}" завершено.` });
+                    }
+                } catch (err) {
+                    cronLog.trace({ message: `❌ Ошибка при применении промпта к треду ${entry.thread_id}:`, error: err });
+                }
+
+                cronLog.trace({ entry });
+            })
+        );
 
         cronLog.trace({ message: `[CRON] Выполнено ${activeReminders.length} запланированных напоминаний` });
     });

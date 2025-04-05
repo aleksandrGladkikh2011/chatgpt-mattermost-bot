@@ -8,6 +8,7 @@ interface Reminder {
     channel_id: string;
     prompt_name: string;
     time: string;
+    days: string[];
     repeat: boolean;
     created_by: string;
     active: boolean;

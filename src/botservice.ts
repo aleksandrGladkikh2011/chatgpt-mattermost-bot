@@ -18,6 +18,7 @@ import { botLog, matterMostLog } from './logging';
 
 import { summaryPrompt, summaryDayPrompt, summaryAdvicePrompt } from './summary';
 import { getChatMessagesByPosts } from './utils/posts';
+import { calculateNextRunDate, WEEK_DAYS, ALL_DAYS } from './utils/time';
 
 import Storage from './storage';
 import Channels from './models/channels';
@@ -322,18 +323,18 @@ const COMMANDS: { [key: string]: Command } = {
         description: `Управление напоминаниями (создание, просмотр, удаление)
 
         📌 Поддерживаемые команды:
-        • !reminder add <HH:mm> <repeat|once> <prompt_name> — создать напоминание
+        • !reminder add <HH:mm> <repeat|once> [<days|all>] <prompt_name> — создать напоминание. Days: ${ALL_DAYS.join(', ')}. Выходные дни (sat, sun) используются только при явном намерении.
         • !reminder list — показать все активные напоминания
         • !reminder delete <prompt_name> — удалить напоминание`,
 
-        example: '\n1. !reminder add 09:00 repeat daily_meeting\n2. !reminder list\n3. !reminder delete daily_meeting',
+        example: '\n1. !reminder add 09:00 repeat mon,wed,fri daily_meeting\n2. !reminder list\n3. !reminder delete daily_meeting',
         channel_type: ['O', 'P'],
 
         fn: async (
             { reminders, prompts }: { reminders: Reminders, prompts: Prompts },
             { post: { message, root_id, channel_id, id }, sender_name, botName }: { post: { message: string, root_id: string, channel_id: string, id: string }, sender_name: string, botName: string }
         ) => {
-            const [, action, timeOrName, repeatOrPrompt, promptName] = message.replace(`@${botName}`, '').trim().split(' ', 5);
+            const [, action, timeOrName, repeatOrPrompt, daysOrPrompt, promptName] = message.replace(`@${botName}`, '').trim().split(' ', 5);
 
             // Проверка на главный канал
             if (root_id) {
@@ -364,9 +365,45 @@ const COMMANDS: { [key: string]: Command } = {
                     };
                 }
 
+                let days: string[];
+                let finalPromptName: string;
+
+                // Если указаны дни недели
+                if (promptName) {
+                    const splitDays = daysOrPrompt.split(',').map(d => d.trim().toLowerCase());
+
+                    days = splitDays.includes('all') ? WEEK_DAYS : splitDays;
+                    finalPromptName = promptName;
+                } else {
+                    // Если дни недели не указаны, рассчитываем текущий или следующий день
+                    const now = DateTime.now().setZone('Europe/Moscow');
+                    const currentDay = now.toFormat('ccc').toLowerCase();
+                    const currentTime = now.toFormat('HH:mm');
+
+                    // Если время ещё не прошло — текущий день
+                    if (currentTime <= time) {
+                        days = [currentDay];
+                    } else {
+                        // Если время прошло — следующий день
+                        const nextDayIndex = (WEEK_DAYS.indexOf(currentDay) + 1) % WEEK_DAYS.length;
+                        const nextDay = WEEK_DAYS[nextDayIndex];
+                        days = [nextDay];
+                    }
+
+                    finalPromptName = daysOrPrompt;
+                }
+
+                // Проверка корректности дней недели
+                if (!days.every(d => ALL_DAYS.includes(d))) {
+                    return {
+                        botInstructions: '⚠️ Некорректные дни недели. Используйте: mon,tue,wed,thu,fri,sat,sun или all.',
+                        useFunctions: false,
+                    };
+                }
+
                 // Проверка существования промпта
-                const prompt = HANDLE_PROMPTS[promptName] || await prompts.get({
-                    name: promptName,
+                const prompt = HANDLE_PROMPTS[finalPromptName] || await prompts.get({
+                    name: finalPromptName,
                     $or: [
                         { type: 'public' },
                         { type: 'private', created_by: sender_name }
@@ -375,37 +412,39 @@ const COMMANDS: { [key: string]: Command } = {
                 
                 if (!prompt) {
                     return {
-                        botInstructions: `⚠️ Промпт с именем **${promptName}** не найден.`,
+                        botInstructions: `⚠️ Промпт с именем **${finalPromptName}** не найден.`,
                         useFunctions: false,
                     };
                 }
 
                 // Проверка на дубликат
-                const existing = await reminders.get({ prompt_name: promptName, channel_id: channel_id, active: true });
+                const existing = await reminders.get({ prompt_name: finalPromptName, channel_id: channel_id, active: true });
 
                 if (existing) {
                     return {
-                        botInstructions: `⚠️ Напоминание с именем **${promptName}** уже существует.`,
+                        botInstructions: `⚠️ Напоминание с именем **${finalPromptName}** уже существует.`,
                         useFunctions: false,
                     };
                 }
 
                 const now = new Date().getTime();
+                const nextRunDate = calculateNextRunDate(time, days);
 
                 await reminders.add({
                     message_id: id,
                     channel_id: channel_id,
-                    prompt_name: promptName,
+                    prompt_name: finalPromptName,
                     created_at: now,
-                    run_date: now,
+                    run_date: nextRunDate,
                     time,
                     repeat,
+                    days,
                     created_by: sender_name,
                     active: true,
                 });
 
                 return {
-                    botInstructions: `🔔 Напоминание **${promptName}** установлено на ${time} (${repeat ? 'повторяется' : 'одноразовое'}).`,
+                    botInstructions: `🔔 Напоминание **${finalPromptName}** установлено на ${time} (${repeat ? 'повторяется' : 'одноразовое'}).`,
                     useFunctions: false,
                 };
             }
@@ -421,9 +460,53 @@ const COMMANDS: { [key: string]: Command } = {
                     };
                 }
 
-                const listMessage = activeReminders.map((r: any) => 
-                    `• ${r.prompt_name} — ${r.time} (${r.repeat ? 'повторяется' : 'одноразовое'})`
-                ).join('\n');
+                const listMessage = activeReminders.map((r: any) => {
+                    // Текущая дата и время в МСК
+                    const now = DateTime.now().setZone('Europe/Moscow');
+                    const currentDayIndex = now.weekday % 7; // 0 - воскресенье
+                    const currentTime = now.toFormat('HH:mm');
+                
+                    let nextRunDate;
+
+                    if (r.repeat) {
+                        // Если повторяемое, ищем ближайший день недели
+                        const dayIndexes = r.days.map((day: string) => ALL_DAYS.indexOf(day));
+                        
+                        // Найдём ближайший день после текущего или следующий день
+                        const futureDays = dayIndexes
+                            .map((dayIndex: number) => {
+                                const daysDiff = (dayIndex - currentDayIndex + 7) % 7;
+                                const targetDate = now.plus({ days: daysDiff }).set({
+                                    hour: parseInt(r.time.split(':')[0]),
+                                    minute: parseInt(r.time.split(':')[1]),
+                                    second: 0,
+                                    millisecond: 0
+                                });
+                
+                                // Если текущий день и время еще не наступило, берем сегодня
+                                if (daysDiff === 0 && currentTime <= r.time) {
+                                    return targetDate;
+                                }
+                                // Если день в будущем
+                                return targetDate;
+                            })
+                            .sort((a: DateTime, b: DateTime) => a.toMillis() - b.toMillis());
+                
+                        nextRunDate = futureDays[0].toFormat('ccc, HH:mm');
+                    } else {
+                        // Если одноразовое, берём run_date
+                        const reminderDate = DateTime.fromMillis(r.run_date).setZone('Europe/Moscow');
+
+                        if (reminderDate > now) {
+                            nextRunDate = reminderDate.toFormat('ccc, HH:mm');
+                        } else {
+                            nextRunDate = 'истекло';
+                        }
+                    }
+                
+                    return `• ${r.prompt_name} — ${r.time} (${r.repeat ? 'повторяется' : 'одноразовое'}) в дни: ${r.days.join(', ')} (следующее: ${nextRunDate})`;
+                }).join('\n');
+                
 
                 return {
                     botInstructions: `📋 **Список активных напоминаний:**\n${listMessage}`,
