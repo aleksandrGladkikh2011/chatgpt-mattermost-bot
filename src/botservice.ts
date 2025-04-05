@@ -334,8 +334,7 @@ const COMMANDS: { [key: string]: Command } = {
             { reminders, prompts }: { reminders: Reminders, prompts: Prompts },
             { post: { message, root_id, channel_id, id }, sender_name, botName }: { post: { message: string, root_id: string, channel_id: string, id: string }, sender_name: string, botName: string }
         ) => {
-            const [, action, timeOrName, repeatOrPrompt, daysOrPrompt, promptName] = message.replace(`@${botName}`, '').trim().split(' ', 5);
-
+            const [, action, timeOrName, repeatOrPrompt, daysOrPrompt, promptName] = message.replace(`@${botName}`, '').trim().split(' ', 6);
             // Проверка на главный канал
             if (root_id) {
                 return {
