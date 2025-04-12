@@ -67,9 +67,6 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     const { channels, prompts, scheduledPrompts, reminders, faqs } = await initModules();
     const msgData = msg.data && parseMessageData(msg.data) || {};
 
-    // const postsT = await getOlderPosts(msgData.post, { lookBackTime: 1000 * 60 * 60 * 24 });
-    // console.log(postsT)
-
     if (msg.event !== 'posted' || !meId || msgData.post?.type === 'system_add_to_channel') {
         matterMostLog.debug({ msg: msg })
         return;
@@ -80,7 +77,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     // TODO: на случай расширения и выносы команд в каналы
     // msgData.channel_type === 'D' - пока только для личных сообщений
     // msgData.channel_type === 'O' - пока только для канала
-    const SPLIT_MESSAGE_FOR_BOT = split(msgData.post.message.replace(`@${botName}`, '').trim(), ' ', 2);
+    const SPLIT_MESSAGE_FOR_BOT = split(msgData.post.message.replace(`@${botName}`, '').trim(), ' ', 1);
     const command: any = SPLIT_MESSAGE_FOR_BOT[0] && COMMANDS[SPLIT_MESSAGE_FOR_BOT[0]];
     // --------------
 
@@ -141,21 +138,19 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
         return;
     } else {
          /* The main system instruction for GPT */
-        let splitMessage = split(msgData.post.message, ' ', 2);
-        let commandName = splitMessage[1];
-
+        const promptName = SPLIT_MESSAGE_FOR_BOT[0];
         // Проверяем, есть ли такой промпт в базе (сначала приватный, затем общий)
-        const userPrompt = await prompts.get({ name: commandName, created_by: msgData.sender_name });
-        const publicPrompt = userPrompt ? null : await prompts.get({ name: commandName, type: 'public' });
+        const userPrompt = await prompts.get({ name: promptName, created_by: msgData.sender_name });
+        const publicPrompt = userPrompt ? null : await prompts.get({ name: promptName, type: 'public' });
 
         if (userPrompt || publicPrompt) {
             const selectedPrompt = userPrompt || publicPrompt;
-            botInstructions = selectedPrompt.text + (splitMessage[2] ?? '');
+            botInstructions = selectedPrompt.text + (SPLIT_MESSAGE_FOR_BOT[1] ?? '');
             useFunctions = false;
         } else {
             // Это было начало и сделали так
-            if (HANDLE_PROMPTS[commandName]) {
-                botInstructions = HANDLE_PROMPTS[commandName] + (splitMessage[2] ?? '');
+            if (HANDLE_PROMPTS[promptName]) {
+                botInstructions = HANDLE_PROMPTS[promptName] + (SPLIT_MESSAGE_FOR_BOT[1] ?? '');
                 useFunctions = false;
             }
             // -----------------------
@@ -169,9 +164,12 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
 
     if (msgData.channel_type === 'D') {
         lookBackTime = 1000 * 60 * 60 * 24 * 7;
+    } else if (['O', 'P'].includes(msgData.channel_type)) {
+        lookBackTime = 1000 * 60 * 60 * 24;
     }
+    // const postsT = await getOlderPosts(msgData.post, { lookBackTime });
 
-    const posts = await getOlderThreadPosts(msgData.post, { lookBackTime });
+    const posts = await (SPLIT_MESSAGE_FOR_BOT[0] !== 'monitor_alerts' ? getOlderThreadPosts : getOlderPosts)(msgData.post, { lookBackTime });
     const chatmessages: ChatCompletionRequestMessage[] = await getChatMessagesByPosts(posts, botInstructions, meId);
 
     typing();

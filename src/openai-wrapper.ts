@@ -4,13 +4,13 @@ import {
     ChatCompletionResponseMessage, ChatCompletionResponseMessageRoleEnum,
     Configuration, CreateChatCompletionRequest, CreateImageRequest,
     OpenAIApi
-} from "openai";
-import {openAILog as log} from "./logging"
+} from 'openai';
+import { openAILog as log } from './logging'
 
-import {PluginBase} from "./plugins/PluginBase";
-import {AiResponse, MessageData} from "./types";
+import { PluginBase } from './plugins/PluginBase';
+import { AiResponse, MessageData } from './types';
 
-const apiKey = process.env['OPENAI_API_KEY'];
+const apiKey = process.env['OPENAI_API_KEY']; 
 const basePath = process.env['OPENAI_API_BASE'];
 log.trace({apiKey, basePath})
 
@@ -18,7 +18,7 @@ const configuration = new Configuration({ apiKey, basePath })
 
 const openai = new OpenAIApi(configuration)
 
-const model = process.env['OPENAI_MODEL_NAME'] ?? 'gpt-3.5-turbo'
+const model = process.env['OPENAI_MODEL_NAME'] ?? 'gpt-4o'
 const max_tokens = Number(process.env['OPENAI_MAX_TOKENS'] ?? 2000)
 const temperature = Number(process.env['OPENAI_TEMPERATURE'] ?? 1)
 
