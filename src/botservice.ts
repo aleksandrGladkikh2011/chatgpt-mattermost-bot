@@ -2,6 +2,7 @@ import 'babel-polyfill'
 import 'isomorphic-fetch'
 import { WebSocketMessage } from '@mattermost/client';
 import { ChatCompletionRequestMessage } from 'openai';
+import { DateTime } from 'luxon';
 
 import { continueThread, registerChatPlugin } from './openai-wrapper';
 import { mmClient, wsClient, getOlderThreadPosts, getOlderPosts, userIdToName } from './mm-client';
@@ -104,7 +105,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
         try {
             if (!command.channel_type.includes(msgData.channel_type)) {
                 await mmClient.createPost({
-                    message: `⚠️ Команда используется только для: ${msgData.channel_type === 'D' ? 'личных сообщений' : 'канала'}`,
+                    message: `⚠️ Команда используется только для: ${command.channel_type.includes('D') ? 'личных сообщений' : 'канала'}`,
                     channel_id: msgData.post.channel_id,
                     root_id: msgData.post.root_id || msgData.post.id,
                 });
@@ -165,7 +166,8 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     if (msgData.channel_type === 'D') {
         lookBackTime = 1000 * 60 * 60 * 24 * 7;
     } else if (['O', 'P'].includes(msgData.channel_type)) {
-        lookBackTime = 1000 * 60 * 60 * 24;
+        const now = DateTime.now();
+        lookBackTime = now.toMillis() - now.startOf('day').toMillis();
     }
     // const postsT = await getOlderPosts(msgData.post, { lookBackTime });
 

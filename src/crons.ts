@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { ChatCompletionRequestMessage } from 'openai';
 import { DateTime } from 'luxon';
+import { Post } from '@mattermost/types/lib/posts';
 
 import Storage from './storage';
 import Prompts from './models/prompts';
@@ -8,7 +9,7 @@ import ScheduledPrompts from './models/scheduled_prompts';
 import Reminders from './models/reminders';
 
 import { continueThread } from './openai-wrapper';
-import { mmClient, getOlderThreadPosts } from './mm-client';
+import { mmClient, getOlderPosts, getOlderThreadPosts } from './mm-client';
 import { getChatMessagesByPosts } from './utils/posts';
 import { cronLog } from './logging';
 import { summaryPrompt, summaryDayPrompt, summaryAdvicePrompt } from './summary';
@@ -44,7 +45,7 @@ export const startCronJobs = () => {
             finished: { $ne: true },
         });
 
-        cronLog.trace({ message: `[CRON] Начало выполнения: ${entries.length} запланированных промптов` });
+        cronLog.info({ message: `[CRON] Начало выполнения: ${entries.length} запланированных промптов` });
 
         for (const entry of entries) {
             const prompt = HANDLE_PROMPTS[entry.prompt_name] ?
@@ -58,7 +59,7 @@ export const startCronJobs = () => {
                 });
 
             if (!prompt) {
-                cronLog.trace({ message: `⚠️ Промпт ${entry.prompt_name} не найден для ${entry.thread_id}` });
+                cronLog.info({ message: `⚠️ Промпт ${entry.prompt_name} не найден для ${entry.thread_id}` });
                 continue;
             }
 
@@ -79,13 +80,13 @@ export const startCronJobs = () => {
                     { finished: true, finished_at: Date.now() }
                 );
             } catch (err) {
-                cronLog.trace({ message: `❌ Ошибка при применении промпта к треду ${entry.thread_id}:`, error: err });
+                cronLog.info({ message: `❌ Ошибка при применении промпта к треду ${entry.thread_id}:`, error: err });
             }
 
-            cronLog.trace({ entry });
+            cronLog.info({ entry });
         }
 
-        cronLog.trace({ message: `[CRON] Выполнено ${entries.length} запланированных промптов` });
+        cronLog.info({ message: `[CRON] Выполнено ${entries.length} запланированных промптов` });
     });
     const CRON_EVERY_FIVE_MINUTES = '*/5 * * * *';
     // Проверка напоминаний и применение промптов
@@ -99,7 +100,7 @@ export const startCronJobs = () => {
 
         const activeReminders = await reminders.getAll({ run_date: { $lte: now.toMillis() }, active: true });
 
-        cronLog.trace({ message: `[CRON] Начало выполнения: ${activeReminders.length} запланированных напоминаний` });
+        cronLog.info({ message: `[CRON] Начало выполнения: ${activeReminders.length} запланированных напоминаний` });
 
         await Promise.all(
             activeReminders.map(async (entry: any) => {
@@ -114,13 +115,21 @@ export const startCronJobs = () => {
                     });
 
                 if (!prompt) {
-                    cronLog.trace({ message: `⚠️ Промпт ${entry.prompt_name} не найден для ${entry.thread_id}` });
+                    cronLog.info({ message: `⚠️ Промпт ${entry.prompt_name} не найден для ${entry.thread_id}` });
                     return;
                 }
 
-                // const posts = await getOlderThreadPosts({ id: entry.message_id, create_at: entry.created_at }, {});
+                let posts: Post[] = [];
+
+                if (entry.withHistory) {
+                    const now = DateTime.now();
+                    const lookBackTime = now.toMillis() - now.startOf('day').toMillis();
+
+                    posts = await getOlderPosts({ channel_id: entry.channel_id, create_at: entry.created_at }, { lookBackTime });
+                }
+
                 // без постов, потому что нет треда и хотим сделать больше как оповещение
-                const chatmessages: ChatCompletionRequestMessage[] = await getChatMessagesByPosts([], prompt.text, meId);
+                const chatmessages: ChatCompletionRequestMessage[] = await getChatMessagesByPosts(posts, prompt.text, meId);
                 const { message, props } = await continueThread(chatmessages, { channel_id: entry.channel_id, id: entry.message_id, create_at: entry.created_at }, { useFunctions: false });
 
                 try {
@@ -135,22 +144,22 @@ export const startCronJobs = () => {
                         // Обновляем дату следующего запуска
                         const nextRunDate = calculateNextRunDate(entry.time, entry.days);
                         await reminders.update({ _id: entry._id }, { run_date: nextRunDate });
-                        cronLog.trace({ message: `🔄 Напоминание "${entry.prompt_name}" обновлено на следующий запуск: ${nextRunDate}` });
+                        cronLog.info({ message: `🔄 Напоминание "${entry.prompt_name}" обновлено на следующий запуск: ${nextRunDate}` });
                     } else {
                         // Если одноразовое — деактивируем
                         await reminders.update({ _id: entry._id }, { active: false, finished_at: Date.now() });
-                        cronLog.trace({ message: `✅ Одноразовое напоминание "${entry.prompt_name}" завершено.` });
+                        cronLog.info({ message: `✅ Одноразовое напоминание "${entry.prompt_name}" завершено.` });
                     }
                 } catch (err) {
-                    cronLog.trace({ message: `❌ Ошибка при применении промпта к треду ${entry.thread_id}:`, error: err });
+                    cronLog.error({ message: `❌ Ошибка при применении промпта к треду ${entry.thread_id}:`, error: err });
                 }
 
-                cronLog.trace({ entry });
+                cronLog.info({ entry });
             })
         );
 
-        cronLog.trace({ message: `[CRON] Выполнено ${activeReminders.length} запланированных напоминаний` });
+        cronLog.info({ message: `[CRON] Выполнено ${activeReminders.length} запланированных напоминаний` });
     });
 
-    cronLog.trace({ message: 'Все крон-задачи запущены.' });
+    cronLog.info({ message: 'Все крон-задачи запущены.' });
 };

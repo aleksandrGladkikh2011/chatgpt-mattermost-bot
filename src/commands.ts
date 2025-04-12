@@ -304,18 +304,18 @@ export const COMMANDS: { [key: string]: Command } = {
         description: `Управление напоминаниями (создание, просмотр, удаление)
 
         📌 Поддерживаемые команды:
-        • !reminder add <HH:mm> <repeat|once> [<days|all>] <prompt_name> — создать напоминание. Days: ${ALL_DAYS.join(', ')}. Выходные дни (sat, sun) используются только при явном намерении.
+        • !reminder add <HH:mm> <repeat|once> [<days|all>] <withHistory> <prompt_name> — создать напоминание. Days: ${ALL_DAYS.join(', ')}. Выходные дни (sat, sun) используются только при явном намерении. withHistory - берём сообщения за текущий день и обрабатываем.
         • !reminder list — показать все активные напоминания
         • !reminder delete <prompt_name> — удалить напоминание`,
 
-        example: '\n1. !reminder add 09:00 repeat mon,wed,fri daily_meeting\n2. !reminder list\n3. !reminder delete daily_meeting',
+        example: '\n1. !reminder add 09:00 repeat mon,wed,fri false daily_meeting\n2. !reminder list\n3. !reminder delete daily_meeting',
         channel_type: ['O', 'P'],
 
         fn: async (
             { reminders, prompts }: { reminders: Reminders, prompts: Prompts },
             { post: { message, root_id, channel_id, id }, sender_name, botName }: { post: { message: string, root_id: string, channel_id: string, id: string }, sender_name: string, botName: string }
         ) => {
-            const [, action, timeOrName, repeatOrPrompt, daysOrPrompt, promptName] = split(message.replace(`@${botName}`, '').trim(), ' ', 5);
+            const [, action, timeOrName, repeatOrPrompt, daysOrPrompt, withHistory, promptName] = split(message.replace(`@${botName}`, '').trim(), ' ', 6);
             // Проверка на главный канал
             if (root_id) {
                 return {
@@ -421,6 +421,7 @@ export const COMMANDS: { [key: string]: Command } = {
                     days,
                     created_by: sender_name,
                     active: true,
+                    withHistory: withHistory === 'true',
                 });
 
                 return {
