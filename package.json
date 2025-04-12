@@ -20,6 +20,7 @@
     "config": "3.3.12",
     "debug-level": "3.0.0",
     "form-data": "4.0.0",
+    "ioredis": "5.6.0",
     "isomorphic-fetch": "3.0.0",
     "luxon": "3.4.2",
     "mongodb": "4.17.1",

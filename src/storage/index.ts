@@ -1,9 +1,12 @@
 import mongoClient from './mongo';
+import redisClient from './redis';
 
 import Prompts from './prompts';
 import Channels from './channels';
 import ScheduledPrompts from './scheduled_prompts';
 import Reminders from './reminders';
+import Vectors from './vectors';
+import Faqs from './faqs';
 
 import PromiseMap from '../utils/promise';
 
@@ -11,22 +14,27 @@ const STORAGES = [
 	{
 		name: 'prompts',
 		Module: Prompts,
-		init: true,
 	},
 	{
 		name: 'channels',
 		Module: Channels,
-		init: true,
 	},
 	{
 		name: 'scheduledPrompts',
 		Module: ScheduledPrompts,
-		init: true,
 	},
 	{
 		name: 'reminders',
 		Module: Reminders,
-		init: true,
+	},
+	{
+		name: 'vectors',
+		Module: Vectors,
+		redis: true,
+	},
+	{
+		name: 'faqs',
+		Module: Faqs,
 	}
 ];
 
@@ -36,7 +44,7 @@ class Storage {
 
 	constructor(req: object) {
 		STORAGES.forEach((storage: any) => {
-			this[storage.name] = new storage.Module(req, mongoClient);
+			this[storage.name] = new storage.Module(req, mongoClient, storage.redis ? redisClient : undefined);
 		});
 	}
 
@@ -44,7 +52,7 @@ class Storage {
 		await mongoClient.connect();
 
 		await PromiseMap(
-			STORAGES.filter((storage: any) => storage.init),
+			STORAGES,
 			async (storage: any) => this[storage.name].init(),
 			{ concurrency: 1 },
 		);
@@ -67,6 +75,14 @@ class Storage {
 
 	getReminders(): Reminders {
 		return this.reminders;
+	}
+
+	getVectors(): Vectors {
+		return this.vectors;
+	}
+
+	getFaqs(): Faqs {
+		return this.faqs;
 	}
 }
 

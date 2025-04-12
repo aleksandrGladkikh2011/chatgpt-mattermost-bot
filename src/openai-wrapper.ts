@@ -159,3 +159,11 @@ export async function createImage(prompt: string): Promise<string | undefined> {
     log.trace({image})
     return image.data?.data[0]?.b64_json
 }
+
+export async function generateEmbedding(text: string): Promise<number[]> {
+    const response = await openai.createEmbedding({
+      model: 'text-embedding-ada-002',
+      input: text,
+    });
+    return response.data.data[0].embedding;
+}
