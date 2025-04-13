@@ -10,6 +10,7 @@ import { calculateNextRunDate, WEEK_DAYS, ALL_DAYS } from './utils/time';
 import { split } from './utils/string';
 
 import { summaryPrompt, summaryDayPrompt, summaryAdvicePrompt } from './summary';
+import { getCalendarForCurrentMonth } from './requests/my_team';
 
 import { queryData, deleteById, addTextById } from './vectors';
 
@@ -616,6 +617,54 @@ export const COMMANDS: { [key: string]: Command } = {
             return {
                 botInstructions: `Вот что я нашёл по твоему запросу:\n${result}`,
                 useFunctions: false,
+            };
+        }
+    },
+    '!absence': {
+        description: `Проверка отсутствий сотрудника (отпуск, больничный и др.) во внешней системе.
+
+        📌 Поддерживаемые команды:
+        • !absence <имя сотрудника> — показать информацию об отсутствиях`,
+        example: `\n1. !absence Иванов, Куделко Роман, Петров`,
+        channel_type: ['O', 'P', 'D'],
+        fn: async (
+            {},
+            { post: { message } }: { post: { message: string }, }
+        ) => {
+            const [, names] = split(message, ' ', 1);
+
+            if (!names) {
+                return {
+                    botInstructions: '⚠️ Укажите имя сотрудника. Пример: `!absence Иванов Иван`',
+                    useFunctions: false,
+                };
+            }
+
+            const results = await getCalendarForCurrentMonth();
+
+            if (!results.length) {
+                return {
+                    botInstructions: '😕 Не удалось найти информацию об отсутствиях.',
+                    useFunctions: false,
+                };
+            }
+
+            const output = results.map(({ user, absences }) => {
+                if (!absences || absences.length === 0) {
+                    return `✅ У **${user}** нет зарегистрированных отсутствий.`;
+                }
+    
+                const list = absences.map(abs => {
+                    return `• ${abs.date} (${abs.count} дн.) — ${abs.typeName} [${abs.statusName}]`;
+                }).join('\n');
+    
+                return `👤 **${user}**:\n${list}`;
+            }).join('\n\n');
+
+            return {
+                botInstructions: `Промпт: Проанализируй дни отсутствия сотрудник/ов ${names} и выведи в читаемой форме кто отсутствует сегодня из списка. 📅 Выгруженные отсутствия:\n${output}`,
+                useFunctions: false,
+                useChatGPT: true,
             };
         }
     }

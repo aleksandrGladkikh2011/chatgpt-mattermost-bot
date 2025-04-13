@@ -29,10 +29,10 @@ export async function addTextById(faq: { _id: number, text: string }) {
   for (const [i, line] of lines.entries()) {
     const embedding = await generateEmbedding(line);
     await vectors.uploadData(generateKey(faq._id, i), embedding, line);
-    vectorsLog.info(`✅ Добавлен новый документ #${faq._id * 1000 + i}: ${line.slice(0, 50)}...`);
+    vectorsLog.info({ message: `✅ Добавлен новый документ #${faq._id * 1000 + i}: ${line.slice(0, 50)}...` });
   }
 
-  vectorsLog.info('🚀 Новый FAQ успешно загружен в Redis!');
+  vectorsLog.info({ message: '🚀 Новый FAQ успешно загружен в Redis!' });
 }
 
 export async function deleteById(id: number) {
@@ -43,12 +43,12 @@ export async function deleteById(id: number) {
     for (let i = 0; i < 100; i++) {
       const key = generateKey(id, i);
       await vectors.deleteData(key);
-      vectorsLog.info(`✅ Удалён документ ${key}`);
+      vectorsLog.info({ message: `✅ Удалён документ ${key}` });
     }
 
-    vectorsLog.info('🚀 FAQ успешно удалён из Redis!');
+    vectorsLog.info({ message: '🚀 FAQ успешно удалён из Redis!' });
   } catch (error: any) {
-    vectorsLog.error(`❌ Ошибка при удалении FAQ ${id}: ${error.message}`);
+    vectorsLog.error({ message: `❌ Ошибка при удалении FAQ ${id}: ${error.message}`, error: error.message });
   }
 }
 
@@ -74,13 +74,13 @@ export async function uploadData() {
 
       // Загружаем данные в Redis
       await vectors.uploadData(key, embedding, item.text);
-      vectorsLog.info(`✅ Загрузил документ ${key}: ${item.text.slice(0, 50)}...`);
+      vectorsLog.info({ message: `✅ Загрузил документ ${key}: ${item.text.slice(0, 50)}...` });
     } catch (error: any) {
-      vectorsLog.error(`❌ Ошибка загрузки документа ${item.id}: ${error.message}`);
+      vectorsLog.error({ message: `❌ Ошибка загрузки документа ${item.id}: ${error.message}`, error: error.message });
     }
   }
 
-  vectorsLog.info('🚀 Данные успешно загружены в Redis!');
+  vectorsLog.info({ message: '🚀 Данные успешно загружены в Redis!' });
 }
 
 export async function queryData(query: string) {
@@ -97,7 +97,7 @@ export async function queryData(query: string) {
   // Извлекаем количество найденных документов
   const numDocs = results[0] as number;
 
-  vectorsLog.info('🔍 Найдено документов:', numDocs);
+  vectorsLog.info({ message: '🔍 Найдено документов:', numDocs });
 
   const response = [];
 

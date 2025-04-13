@@ -113,7 +113,7 @@ export class MongoClientLocal {
 		if (!collectionNames.includes(name)) {
 			return this.db.createCollection(name);
 		} else {
-			log.debug('Collection already exists', { name, method: 'createCollection' });
+			log.debug({ message: 'Collection already exists', name, method: 'createCollection' });
 			return this.db.collection(name);
 		}
 	}

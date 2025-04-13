@@ -117,12 +117,18 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
 
             botInstructions = result.botInstructions;
             useFunctions = result.useFunctions;
+            
+            const useChatGPT = result.useChatGPT;
+            
+            if (!useChatGPT) {
+                await mmClient.createPost({
+                    message: botInstructions,
+                    channel_id: msgData.post.channel_id,
+                    root_id: msgData.post.root_id || msgData.post.id,
+                });
 
-            await mmClient.createPost({
-                message: botInstructions,
-                channel_id: msgData.post.channel_id,
-                root_id: msgData.post.root_id || msgData.post.id,
-            });
+                return;
+            }
         } catch (e) {
             botLog.error(e)
             await mmClient.createPost({
@@ -133,8 +139,6 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
         } finally {
             clearInterval(typingInterval)
         }
-
-        return;
     } else if (isMessageIgnored(msgData, meId)) {
         return;
     } else {
@@ -178,7 +182,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     const typingInterval = setInterval(typing, 2000);
 
     try {
-        const {message, fileId, props} = await continueThread(chatmessages, msgData, { useFunctions });
+        const { message, fileId, props } = await continueThread(chatmessages, msgData, { useFunctions });
         botLog.trace({ message });
         // create answer response
         const newPost = await mmClient.createPost({
