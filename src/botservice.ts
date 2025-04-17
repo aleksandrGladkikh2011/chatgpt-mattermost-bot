@@ -69,7 +69,7 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
     const msgData = msg.data && parseMessageData(msg.data) || {};
 
     if (msg.event !== 'posted' || !meId || msgData.post?.type === 'system_add_to_channel') {
-        matterMostLog.debug({ msg: msg })
+        botLog.info({ skip: true, msg: msg })
         return;
     }
 
@@ -87,6 +87,8 @@ async function onClientMessage(msg: WebSocketMessage<JSONMessageData>, meId: str
 
     // start typing
     const typing = () => wsClient.userTyping(msgData.post.channel_id, (msgData.post.root_id || msgData.post.id) ?? "")
+
+    botLog.info({ msg: msgData, isCommand: !!command });
 
     // Проверка, что сообщение в канале или треде с упоминанием бота + shouldValidateContent: true
     if (
